@@ -128,8 +128,24 @@ main(){
 
   print_info "Building ${REPO}@${VERSION} with go install"
   mkdir -p "$INSTALL_DIR"
-  if ping -c 1 -W 1 goproxy.cn >/dev/null 2>&1; then export GOPROXY=https://goproxy.cn,direct; fi
-  GOBIN="$INSTALL_DIR" CGO_ENABLED=0 go install -ldflags "-s -w" "${REPO}@${VERSION}" || { print_error "go install failed"; exit 1; }
+  # A fresh repo may not be indexed by every module proxy yet, so try a few
+  # known-good sources (and finally direct VCS) before giving up.
+  export GOBIN="$INSTALL_DIR" CGO_ENABLED=0
+  BUILD_LOG="/tmp/ipv6-proxy-build.log"
+  BUILD_OK=0
+  for proxy in "https://proxy.golang.org,https://goproxy.cn,direct" "https://goproxy.cn,direct" "direct"; do
+    for ref in "$VERSION" main; do
+      [ "$BUILD_OK" = "1" ] && break
+      print_info "Trying GOPROXY=${proxy} ref=${ref}"
+      if GOPROXY="$proxy" go install -ldflags "-s -w" "${REPO}@${ref}" 2>"$BUILD_LOG"; then
+        BUILD_OK=1
+      else
+        print_warning "Build failed: $(tail -n 1 "$BUILD_LOG")"
+      fi
+    done
+    [ "$BUILD_OK" = "1" ] && break
+  done
+  [ "$BUILD_OK" = "1" ] || { print_error "go install failed, last error: $(tail -n 1 "$BUILD_LOG")"; exit 1; }
   # go names the binary after the last path element of the repo
   BIN_NAME="$(basename "${REPO%%@*}")"
   if [ "$BIN_NAME" != "ipv6-proxy" ] && [ -f "$INSTALL_DIR/$BIN_NAME" ]; then mv -f "$INSTALL_DIR/$BIN_NAME" "$INSTALL_DIR/ipv6-proxy"; fi
