@@ -1,0 +1,11 @@
+# Runtime config contains credentials - never commit
+config.json
+
+# Built binary
+/ipv6-proxy
+/ipv6-proxy.exe
+
+# Go build/test artifacts
+*.test
+*.out
+/dist/

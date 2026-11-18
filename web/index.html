@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Prefixa · IPv6 Gateway</title>
+<meta name="description" content="Prefixa IPv6 rotation gateway control panel">
+<meta name="theme-color" content="#0b1020">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="48x48">
+<link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
+<link rel="manifest" href="/assets/site.webmanifest">
+<script>
+// apply the saved / system theme before first paint
+(function(){try{var t=localStorage.getItem('pfx-theme');if(!t)t=matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';document.documentElement.setAttribute('data-theme',t)}catch(e){}})();
+</script>
+<style>
+:root{
+  --bg:#0a0e1a;--bg2:#0d1324;--surface:#111a2e;--surface2:#16213a;--line:#223052;--line2:#2c3d66;
+  --text:#e8edf8;--muted:#8b9bbd;--faint:#5d6d92;
+  --accent:#6366f1;--cyan:#22d3ee;--violet:#a855f7;
+  --ok:#34d399;--okbg:rgba(52,211,153,.12);--bad:#fb7185;--badbg:rgba(251,113,133,.12);--warn:#fbbf24;--warnbg:rgba(251,191,36,.12);
+  --glow:rgba(99,102,241,.22);--shadow:0 10px 30px -12px rgba(0,0,0,.6);
+  --grad:linear-gradient(135deg,#22d3ee 0%,#6366f1 55%,#a855f7 100%);
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  --sans:Inter,"Segoe UI",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
+  --r:14px;
+}
+:root[data-theme="light"]{
+  --bg:#f4f6fb;--bg2:#eef1f8;--surface:#ffffff;--surface2:#f6f8fd;--line:#e2e7f2;--line2:#cfd7ea;
+  --text:#0f172a;--muted:#5a6784;--faint:#8c97b2;
+  --ok:#059669;--okbg:rgba(5,150,105,.1);--bad:#e11d48;--badbg:rgba(225,29,72,.09);--warn:#b45309;--warnbg:rgba(217,119,6,.12);
+  --glow:rgba(99,102,241,.14);--shadow:0 10px 30px -14px rgba(30,41,90,.25);
+}
+*{box-sizing:border-box}
+html{color-scheme:dark}
+:root[data-theme="light"]{color-scheme:light}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 var(--sans);-webkit-font-smoothing:antialiased;
+  background-image:radial-gradient(900px 420px at 12% -10%,var(--glow),transparent 60%),radial-gradient(700px 380px at 95% -5%,rgba(34,211,238,.09),transparent 60%);
+  background-repeat:no-repeat;min-height:100vh;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+.wrap{max-width:1240px;margin:0 auto;padding:20px 20px 48px}
+:focus-visible{outline:2px solid var(--cyan);outline-offset:2px;border-radius:8px}
+
+/* header */
+header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:22px}
+.brand{display:flex;align-items:center;gap:12px;margin-right:auto;min-width:0}
+.brand svg{width:40px;height:40px;flex:none;filter:drop-shadow(0 6px 14px var(--glow))}
+.brand h1{font-size:20px;line-height:1.1;margin:0;font-weight:750;letter-spacing:-.4px}
+.brand h1 b{color:var(--accent);font-weight:750}
+.brand small{display:block;margin-top:3px;font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--faint);font-weight:600}
+.pill{display:inline-flex;align-items:center;gap:8px;padding:7px 12px;border:1px solid var(--line);background:var(--surface);border-radius:999px;font-size:12.5px;color:var(--muted);white-space:nowrap}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--faint);flex:none}
+.pill.on .dot{background:var(--ok);box-shadow:0 0 0 0 rgba(52,211,153,.55);animation:ping 2s infinite}
+.pill.off .dot{background:var(--bad)}
+.pill.on{color:var(--text)}
+@keyframes ping{0%{box-shadow:0 0 0 0 rgba(52,211,153,.5)}70%{box-shadow:0 0 0 8px rgba(52,211,153,0)}100%{box-shadow:0 0 0 0 rgba(52,211,153,0)}}
+.iconbtn{width:36px;height:36px;display:grid;place-items:center;border:1px solid var(--line);background:var(--surface);color:var(--muted);border-radius:10px;cursor:pointer;padding:0}
+.iconbtn:hover{color:var(--text);border-color:var(--line2)}
+.iconbtn svg{width:18px;height:18px}
+.sun{display:none}:root[data-theme="light"] .sun{display:block}:root[data-theme="light"] .moon{display:none}
+
+/* layout */
+.grid{display:grid;gap:14px}
+.kpis{grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:14px}
+.main{grid-template-columns:minmax(0,1.55fr) minmax(0,1fr);margin-bottom:14px;align-items:start}
+.card{background:linear-gradient(180deg,var(--surface),var(--surface2));border:1px solid var(--line);border-radius:var(--r);padding:16px 18px;box-shadow:var(--shadow);min-width:0}
+.card h2{margin:0;font-size:13px;font-weight:650;letter-spacing:.02em;display:flex;align-items:center;gap:8px}
+.card h2 .hint{margin-left:auto;font-weight:500;color:var(--faint);font-size:11.5px}
+.card-h{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:14px}
+
+/* kpi */
+.kpi .lbl{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.08em}
+.kpi .lbl i{width:7px;height:7px;border-radius:2px;background:var(--grad)}
+.kpi .val{font-size:30px;font-weight:750;letter-spacing:-.8px;line-height:1.15;margin:8px 0 2px;font-variant-numeric:tabular-nums}
+.kpi .val small{font-size:14px;color:var(--muted);font-weight:600;letter-spacing:0}
+.kpi .sub{color:var(--muted);font-size:12px;min-height:18px;font-variant-numeric:tabular-nums}
+.spark{display:block;width:100%;height:34px;margin-top:8px}
+.spark path.l{fill:none;stroke:var(--accent);stroke-width:1.8;stroke-linejoin:round;stroke-linecap:round;vector-effect:non-scaling-stroke}
+.spark path.a{fill:url(#sg);opacity:.9}
+
+/* chart */
+.legend{display:flex;gap:14px;color:var(--muted);font-size:12px}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.legend i{width:10px;height:3px;border-radius:2px}
+#chart{width:100%;height:210px;display:block}
+#chart .grid line{stroke:var(--line);stroke-width:1;stroke-dasharray:3 4}
+#chart text{fill:var(--faint);font-size:10px;font-family:var(--mono)}
+.chart-foot{display:flex;justify-content:space-between;color:var(--faint);font-size:11px;margin-top:6px}
+
+/* pool */
+.meter{height:10px;border-radius:99px;background:var(--bg2);border:1px solid var(--line);overflow:hidden}
+.meter>div{height:100%;width:0;background:var(--grad);border-radius:99px;transition:width .5s ease}
+.meter-t{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px}
+.meter-t b{font-size:24px;letter-spacing:-.5px;font-variant-numeric:tabular-nums}
+.meter-t span{color:var(--muted);font-size:12px}
+.ctl{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end;margin-top:14px}
+.ctl label{grid-column:1/-1;font-size:12px;color:var(--muted);font-weight:600}
+.num{display:flex;align-items:center;border:1px solid var(--line2);background:var(--bg2);border-radius:10px;overflow:hidden}
+.num input{flex:1;min-width:0;background:transparent;border:0;color:var(--text);padding:10px 12px;font:600 14px var(--mono);outline:0;text-align:left}
+.num:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--glow)}
+.num input::-webkit-inner-spin-button{opacity:.4}
+.btn{border:1px solid transparent;border-radius:10px;padding:10px 14px;font:650 13px var(--sans);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:7px;white-space:nowrap;color:#fff;background:var(--grad);transition:transform .08s,filter .15s,opacity .15s}
+.btn:hover{filter:brightness(1.1)}.btn:active{transform:translateY(1px)}.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn.ghost{background:var(--surface);color:var(--text);border-color:var(--line2)}
+.btn.ghost:hover{border-color:var(--accent)}
+.btn.warn{background:var(--warnbg);color:var(--warn);border-color:rgba(251,191,36,.3)}
+.btn.danger{background:var(--badbg);color:var(--bad);border-color:rgba(251,113,133,.3)}
+.btn svg{width:15px;height:15px}
+.actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:14px;padding-top:14px;border-top:1px dashed var(--line)}
+
+/* info */
+dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:9px 16px;font-size:13px}
+dt{color:var(--muted)}dd{margin:0;text-align:right;font-family:var(--mono);font-size:12.5px;word-break:break-all}
+.tag{display:inline-block;padding:2px 8px;border-radius:99px;font:600 11px var(--sans);background:var(--okbg);color:var(--ok)}
+.tag.off{background:var(--surface2);color:var(--faint);border:1px solid var(--line)}
+
+/* tables */
+.tbl{overflow-x:auto;margin:0 -6px}
+table{width:100%;border-collapse:collapse;min-width:460px}
+th{color:var(--faint);font-size:11px;text-transform:uppercase;letter-spacing:.08em;font-weight:650;text-align:left;padding:6px 10px}
+td{padding:9px 10px;border-top:1px solid var(--line);font-size:12.5px;vertical-align:middle}
+td.m{font-family:var(--mono);font-size:12px}
+td .cut{display:block;max-width:210px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+tr:hover td{background:rgba(99,102,241,.05)}
+.empty{color:var(--faint);text-align:center;padding:26px 0!important}
+.badge{display:inline-flex;align-items:center;gap:6px;padding:2px 9px;border-radius:99px;font:650 11px var(--sans);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.badge.ok{background:var(--okbg);color:var(--ok)}.badge.bad{background:var(--badbg);color:var(--bad)}.badge.live{background:var(--warnbg);color:var(--warn)}
+.chips{display:flex;gap:6px}
+.chip{border:1px solid var(--line);background:transparent;color:var(--muted);border-radius:99px;padding:3px 11px;font:600 11.5px var(--sans);cursor:pointer}
+.chip[aria-pressed=true]{background:var(--accent);border-color:var(--accent);color:#fff}
+.two{grid-template-columns:minmax(0,1.7fr) minmax(0,1fr)}
+
+/* toast + dialog */
+#toasts{position:fixed;right:16px;bottom:16px;display:flex;flex-direction:column;gap:8px;z-index:50}
+.toast{background:var(--surface);border:1px solid var(--line2);border-left:3px solid var(--accent);color:var(--text);padding:10px 14px;border-radius:10px;box-shadow:var(--shadow);font-size:13px;max-width:340px;animation:in .2s ease}
+.toast.bad{border-left-color:var(--bad)}.toast.ok{border-left-color:var(--ok)}
+@keyframes in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+dialog{background:var(--surface);color:var(--text);border:1px solid var(--line2);border-radius:16px;padding:22px;max-width:400px;width:calc(100% - 32px);box-shadow:0 30px 80px -20px rgba(0,0,0,.7)}
+dialog::backdrop{background:rgba(5,8,18,.6);backdrop-filter:blur(3px)}
+dialog h3{margin:0 0 6px;font-size:17px}dialog p{margin:0 0 16px;color:var(--muted)}
+dialog .row{display:flex;gap:8px;justify-content:flex-end}
+footer{margin-top:26px;text-align:center;color:var(--faint);font-size:12px}
+footer b{color:var(--muted);font-weight:650}
+
+@media(max-width:1020px){.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.main,.two{grid-template-columns:1fr}}
+@media(max-width:520px){.wrap{padding:14px 12px 40px}.kpi .val{font-size:25px}.kpis{gap:10px}.card{padding:14px}.brand small{display:none}.pill .up{display:none}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="sg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#6366f1" stop-opacity=".35"/><stop offset="1" stop-color="#6366f1" stop-opacity="0"/></linearGradient>
+    <linearGradient id="pfx-g" x1="8" y1="6" x2="56" y2="58" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#22d3ee"/><stop offset=".55" stop-color="#6366f1"/><stop offset="1" stop-color="#a855f7"/></linearGradient>
+  </defs>
+</svg>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <svg viewBox="0 0 64 64" role="img" aria-label="Prefixa logo">
+        <polygon points="32,8 52.8,20 52.8,44 32,56 11.2,44 11.2,20" fill="url(#pfx-g)" stroke="url(#pfx-g)" stroke-width="7" stroke-linejoin="round"/>
+        <circle cx="25.5" cy="25.5" r="3.6" fill="#fff"/><circle cx="25.5" cy="38.5" r="3.6" fill="#fff"/>
+        <circle cx="38.5" cy="25.5" r="3.6" fill="#fff" fill-opacity=".62"/><circle cx="38.5" cy="38.5" r="3.6" fill="#fff" fill-opacity=".62"/>
+      </svg>
+      <div><h1>Prefix<b>a</b></h1><small>IPv6 rotation gateway</small></div>
+    </div>
+    <span class="pill" id="conn"><i class="dot"></i><span id="connText">Connecting…</span><span class="up" id="uptimePill"></span></span>
+    <button class="iconbtn" id="theme" title="Toggle theme" aria-label="Toggle theme">
+      <svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+      <svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+    </button>
+  </header>
+
+  <section class="grid kpis" aria-label="Key metrics">
+    <div class="card kpi"><div class="lbl"><i></i>Active</div><div class="val" id="kActive">–</div><div class="sub" id="kActiveSub">live connections</div>
+      <svg class="spark" id="spActive" viewBox="0 0 100 34" preserveAspectRatio="none"><path class="a"/><path class="l"/></svg></div>
+    <div class="card kpi"><div class="lbl"><i></i>Success rate</div><div class="val" id="kRate">–</div><div class="sub" id="kRateSub">–</div>
+      <svg class="spark" id="spRate" viewBox="0 0 100 34" preserveAspectRatio="none"><path class="a"/><path class="l"/></svg></div>
+    <div class="card kpi"><div class="lbl"><i></i>Throughput</div><div class="val" id="kTp">–</div><div class="sub" id="kTpSub">–</div>
+      <svg class="spark" id="spTp" viewBox="0 0 100 34" preserveAspectRatio="none"><path class="a"/><path class="l"/></svg></div>
+    <div class="card kpi"><div class="lbl"><i></i>IPv6 pool</div><div class="val"><span id="kPool">–</span><small> / <span id="kTarget">–</span></small></div><div class="sub" id="kPoolSub">–</div>
+      <svg class="spark" id="spPool" viewBox="0 0 100 34" preserveAspectRatio="none"><path class="a"/><path class="l"/></svg></div>
+  </section>
+
+  <section class="grid main">
+    <div class="card">
+      <div class="card-h"><h2>Traffic <span class="hint">last 3 minutes</span></h2>
+        <div class="legend"><span><i style="background:var(--cyan)"></i>Download</span><span><i style="background:var(--violet)"></i>Upload</span></div></div>
+      <svg id="chart" viewBox="0 0 640 210" preserveAspectRatio="none" role="img" aria-label="Traffic chart"></svg>
+      <div class="chart-foot"><span>3 min ago</span><span id="chartPeak">peak –</span><span>now</span></div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>IP pool</h2><span class="tag" id="rotTag">…</span></div>
+      <div class="meter-t"><b id="poolBig">–</b><span id="poolNote">–</span></div>
+      <div class="meter"><div id="meterBar"></div></div>
+      <div class="ctl"><label for="addCount">Add addresses</label>
+        <div class="num"><input id="addCount" type="number" min="1" step="1" value="1" inputmode="numeric"></div>
+        <button class="btn" id="bAdd">Add</button></div>
+      <div class="ctl"><label for="poolCount">Set pool size</label>
+        <div class="num"><input id="poolCount" type="number" min="1" step="1" value="1" inputmode="numeric"></div>
+        <button class="btn ghost" id="bSet">Apply</button></div>
+      <div class="actions">
+        <button class="btn warn" id="bRot"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 1-15.5 6.2L3 16"/><path d="M3 12a9 9 0 0 1 15.5-6.2L21 8"/><path d="M21 3v5h-5M3 21v-5h5"/></svg>Rotate now</button>
+        <button class="btn danger" id="bClear"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>Delete all</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="grid two" style="margin-bottom:14px">
+    <div class="card">
+      <div class="card-h"><h2>Live connections <span class="hint">up to 10 · auto-close after 1000 s</span></h2></div>
+      <div class="tbl"><table><thead><tr><th>Client</th><th>Target</th><th>IPv6</th><th>Time</th></tr></thead><tbody id="act"></tbody></table></div>
+    </div>
+    <div class="card">
+      <div class="card-h"><h2>Gateway</h2></div>
+      <dl id="info"><dt>Loading</dt><dd>…</dd></dl>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-h"><h2>Recent activity <span class="hint">last 10 connections</span></h2>
+      <div class="chips" role="group" aria-label="Filter"><button class="chip" data-f="all" aria-pressed="true">All</button><button class="chip" data-f="ok" aria-pressed="false">Success</button><button class="chip" data-f="bad" aria-pressed="false">Failed</button></div></div>
+    <div class="tbl"><table><thead><tr><th>Time</th><th>Client</th><th>Target</th><th>IPv6</th><th>Status</th><th>Duration</th></tr></thead><tbody id="logs"></tbody></table></div>
+  </section>
+
+  <footer><b>Prefixa</b> · IPv6 rotation gateway · v7.6</footer>
+</div>
+
+<div id="toasts" role="status" aria-live="polite"></div>
+<dialog id="dlg"><h3 id="dlgT"></h3><p id="dlgP"></p><div class="row"><button class="btn ghost" id="dlgNo">Cancel</button><button class="btn danger" id="dlgYes">Confirm</button></div></dialog>
+
+<script>
+'use strict';
+const $=s=>document.querySelector(s);
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtN=n=>Number(n||0).toLocaleString();
+function fmtB(n){n=Number(n||0);const u=['B','KB','MB','GB','TB'];let i=0;while(n>=1024&&i<u.length-1){n/=1024;i++}return (i?n.toFixed(n<10?2:1):Math.round(n))+' '+u[i]}
+const fmtR=n=>fmtB(n)+'/s';
+const MAXH=60;
+const H={active:[],rate:[],tp:[],pool:[],down:[],up:[]};
+let last=null,online=false,busy=false,filter='all',logsCache=[];
+
+/* ---------- theme ---------- */
+$('#theme').onclick=()=>{const r=document.documentElement,t=r.getAttribute('data-theme')==='light'?'dark':'light';r.setAttribute('data-theme',t);try{localStorage.setItem('pfx-theme',t)}catch(e){}};
+
+/* ---------- helpers ---------- */
+function toast(msg,kind){const t=document.createElement('div');t.className='toast '+(kind||'');t.textContent=msg;$('#toasts').appendChild(t);setTimeout(()=>t.remove(),4200)}
+async function api(u,body){const o=body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)};const r=await fetch(u,o);if(!r.ok)throw new Error((await r.text()).trim()||r.statusText);return r.json()}
+function confirmDlg(title,text,yes){return new Promise(res=>{$('#dlgT').textContent=title;$('#dlgP').textContent=text;$('#dlgYes').textContent=yes||'Confirm';const d=$('#dlg');const done=v=>{d.close();res(v)};$('#dlgYes').onclick=()=>done(true);$('#dlgNo').onclick=()=>done(false);d.oncancel=()=>res(false);d.showModal()})}
+function push(a,v){a.push(v);if(a.length>MAXH)a.shift()}
+function spark(id,vals,max){const s=$(id),w=100,h=34;if(vals.length<2){s.querySelector('.l').setAttribute('d','');s.querySelector('.a').setAttribute('d','');return}
+  const slots=Math.min(MAXH,Math.max(vals.length,16)),m=max||Math.max(...vals,1),dx=w/(slots-1),x0=w-(vals.length-1)*dx;
+  const pts=vals.map((v,i)=>[x0+i*dx,h-2-(v/m)*(h-6)]);const d='M'+pts.map(p=>p[0].toFixed(1)+' '+p[1].toFixed(1)).join(' L');
+  s.querySelector('.l').setAttribute('d',d);s.querySelector('.a').setAttribute('d',d+` L${w} ${h} L${x0.toFixed(1)} ${h} Z`)}
+
+/* ---------- main chart ---------- */
+function drawChart(){const W=640,Hh=210,pl=0,pt=10,pb=8;const all=[...H.down,...H.up];const max=Math.max(...all,1024);const slots=Math.min(MAXH,Math.max(H.down.length,20)),ih=Hh-pt-pb,dx=W/(slots-1);
+  const path=(v,close)=>{if(v.length<2)return '';const x0=W-(v.length-1)*dx;const pts=v.map((y,i)=>[x0+i*dx,pt+ih-(y/max)*ih]);let d='M'+pts.map(p=>p[0].toFixed(1)+' '+p[1].toFixed(1)).join(' L');if(close)d+=` L${W} ${pt+ih} L${x0.toFixed(1)} ${pt+ih} Z`;return d};
+  let g='';for(let i=0;i<=3;i++){const y=pt+ih*i/3;g+=`<line x1="0" x2="${W}" y1="${y}" y2="${y}"/>`}
+  $('#chart').innerHTML=`<defs><linearGradient id="cd" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#22d3ee" stop-opacity=".30"/><stop offset="1" stop-color="#22d3ee" stop-opacity="0"/></linearGradient><linearGradient id="cu" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#a855f7" stop-opacity=".28"/><stop offset="1" stop-color="#a855f7" stop-opacity="0"/></linearGradient></defs><g class="grid">${g}</g>
+  <path d="${path(H.down,1)}" fill="url(#cd)"/><path d="${path(H.up,1)}" fill="url(#cu)"/>
+  <path d="${path(H.down)}" fill="none" stroke="#22d3ee" stroke-width="2" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>
+  <path d="${path(H.up)}" fill="none" stroke="#a855f7" stroke-width="2" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>`;
+  $('#chartPeak').textContent='peak '+fmtR(max===1024&&!all.some(v=>v>0)?0:max)}
+
+/* ---------- render ---------- */
+function setOnline(v,up){online=v;const p=$('#conn');p.className='pill '+(v?'on':'off');$('#connText').textContent=v?'Online':'Disconnected';$('#uptimePill').textContent=v&&up?'· up '+up:''}
+function renderStats(s){
+  const now=Date.now();let down=0,upl=0;
+  if(last){const dt=(now-last.t)/1000;if(dt>0){down=Math.max(0,(s.bytes_recv-last.recv)/dt);upl=Math.max(0,(s.bytes_sent-last.sent)/dt)}}
+  last={t:now,recv:s.bytes_recv,sent:s.bytes_sent};
+  const done=s.success+s.failed,rate=done?s.success/done*100:null;
+  push(H.active,s.active);push(H.rate,rate==null?100:rate);push(H.tp,down+upl);push(H.pool,s.pool);push(H.down,down);push(H.up,upl);
+  $('#kActive').textContent=fmtN(s.active);$('#kActiveSub').textContent=fmtN(s.total)+' total connections';
+  $('#kRate').innerHTML=rate==null?'–':rate.toFixed(1)+'<small>%</small>';$('#kRateSub').textContent=fmtN(s.success)+' ok · '+fmtN(s.failed)+' failed';
+  $('#kTp').textContent=fmtR(down+upl);$('#kTpSub').textContent='↓ '+fmtR(down)+'  ↑ '+fmtR(upl);
+  $('#kPool').textContent=fmtN(s.pool);$('#kTarget').textContent=fmtN(s.target);
+  const pct=s.target?Math.min(100,s.pool/s.target*100):0;
+  $('#kPoolSub').textContent=s.pool<s.target?'filling… '+Math.round(pct)+'%':'pool ready';
+  $('#poolBig').textContent=fmtN(s.pool);$('#poolNote').textContent=s.pool<s.target?'of '+fmtN(s.target)+' target · filling':'of '+fmtN(s.target)+' target · ready';
+  $('#meterBar').style.width=pct+'%';
+  $('#rotTag').textContent=s.auto_rotate?'auto-rotate · '+(s.rotate_interval||6)+'h':'manual rotate';$('#rotTag').className='tag'+(s.auto_rotate?'':' off');
+  if(document.activeElement.id!=='poolCount')$('#poolCount').value=s.target||1;
+  spark('#spActive',H.active);spark('#spRate',H.rate,100);spark('#spTp',H.tp);spark('#spPool',H.pool);drawChart();
+  setOnline(true,s.uptime)}
+function renderActive(a){const b=$('#act');a=a||[];b.innerHTML=a.length?a.map(x=>`<tr><td class="m"><span class="cut" title="${esc(x.ClientIP)}">${esc(x.ClientIP)}</span></td><td class="m"><span class="cut" title="${esc(x.Target)}">${esc(x.Target)}</span></td><td class="m"><span class="cut" title="${esc(x.IPv6)}">${x.IPv6==='dialing'?'<span class="badge live">dialing</span>':esc(x.IPv6)}</span></td><td class="m">${esc(x.Duration)}</td></tr>`).join(''):'<tr><td colspan="4" class="empty">No active connections</td></tr>'}
+function renderLogs(){const b=$('#logs');let a=(logsCache||[]).slice().reverse();if(filter==='ok')a=a.filter(x=>x.Status==='success');if(filter==='bad')a=a.filter(x=>x.Status!=='success');
+  b.innerHTML=a.length?a.map(x=>{const ok=x.Status==='success';return `<tr><td class="m">${esc(x.Time)}</td><td class="m"><span class="cut" title="${esc(x.ClientIP)}">${esc(x.ClientIP)}</span></td><td class="m"><span class="cut" title="${esc(x.Target)}">${esc(x.Target)}</span></td><td class="m"><span class="cut" title="${esc(x.IPv6)}">${esc(x.IPv6)}</span></td><td><span class="badge ${ok?'ok':'bad'}" title="${esc(x.Status)}">${ok?'success':esc(x.Status)}</span></td><td class="m">${esc(x.Duration)}</td></tr>`}).join(''):'<tr><td colspan="6" class="empty">Nothing to show yet</td></tr>'}
+function renderInfo(i){const row=(k,v)=>`<dt>${k}</dt><dd>${v}</dd>`;
+  $('#info').innerHTML=row('Prefix',esc(i.prefix))+row('Interface',esc(i.interface))+row('Proxy port',esc(i.proxy_port)+' <span class="tag">HTTP + SOCKS5</span>')+row('Web port',esc(i.web_port))+row('Extra ports',esc(i.extra_ports))+row('Auto-rotate',i.auto_rotate?'every '+esc(i.rotate_hours||6)+' h':'off')+row('Auto-clean',i.auto_clean?'on':'off')+row('Version',esc(i.version))}
+
+/* ---------- polling ---------- */
+async function tick(){if(busy)return;busy=true;
+  try{const [s,a,l]=await Promise.all([api('/api/stats'),api('/api/active'),api('/api/logs')]);renderStats(s);renderActive(a);logsCache=l||[];renderLogs()}
+  catch(e){setOnline(false)}finally{busy=false}}
+async function loadInfo(){try{renderInfo(await api('/api/info'))}catch(e){}}
+
+/* ---------- actions ---------- */
+const val=id=>Math.max(1,parseInt($(id).value||'1',10)||1);
+async function act(btn,fn){btn.disabled=true;try{await fn()}catch(e){toast('Failed: '+e.message,'bad')}finally{btn.disabled=false;tick()}}
+$('#bAdd').onclick=e=>act(e.currentTarget,async()=>{const r=await api('/api/add_ips',{count:val('#addCount')});toast('Added '+r.added+' address'+(r.added===1?'':'es')+' · target '+r.target,'ok')});
+$('#bSet').onclick=e=>act(e.currentTarget,async()=>{const r=await api('/api/pool',{count:val('#poolCount')});toast('Pool size set to '+r.target,'ok')});
+$('#bRot').onclick=e=>act(e.currentTarget,async()=>{const r=await api('/api/rotate',{});toast(r.message||'Rotation started','ok')});
+$('#bClear').onclick=async e=>{const b=e.currentTarget;if(!await confirmDlg('Delete all IPv6 addresses?','This removes every address from the interface and sets the target to 0. Active connections using them will drop.','Delete all'))return;act(b,async()=>{const r=await api('/api/clear_ips',{});toast('Deleted '+r.deleted+' address'+(r.deleted===1?'':'es'),'ok')})};
+document.querySelectorAll('.chip').forEach(c=>c.onclick=()=>{filter=c.dataset.f;document.querySelectorAll('.chip').forEach(x=>x.setAttribute('aria-pressed',x===c));renderLogs()});
+['addCount','poolCount'].forEach(id=>$('#'+id).addEventListener('keydown',e=>{if(e.key==='Enter')$(id==='addCount'?'#bAdd':'#bSet').click()}));
+
+setInterval(tick,3000);setInterval(loadInfo,30000);tick();loadInfo();
+</script>
+</body>
+</html>
