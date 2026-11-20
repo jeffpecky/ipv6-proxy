@@ -21,10 +21,12 @@ Content-Type: application/json
 ```
 
 A valid report returns `204 No Content` with `X-Rotated: <prefix>`. The proxy
-username is pinned to one exit until a report condemns it; then the whole `/64`
-bucket is retired, cooled for `signal_cooldown_minutes` (default 15), and the
-client gets a fresh exit. Repeat reports for a bucket already cooling only
-rotate the lane. Multiple clients need distinct proxy usernames.
+username is pinned to one exit until a report condemns it; then the whole bucket
+is retired, cooled for `signal_cooldown_minutes` (default 15), and the client
+gets a fresh exit. With a routed HE `/48`, the installer carves `/64` buckets
+from it (8 by default, `POOL_48_PREFIX_COUNT`) so rotation stays inside the
+`/48`. Repeat reports for a bucket already cooling only rotate the lane.
+Multiple clients need distinct proxy usernames.
 
 `signal_token` defaults to `PROXY_PASS` in the installer and can be set through
 `SIGNAL_TOKEN` in `install.env`. The signal count is exposed at `/api/stats`.

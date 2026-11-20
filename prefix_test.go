@@ -67,10 +67,16 @@ func TestGenIPStaysInsideAConfiguredPrefix(t *testing.T) {
 	}
 }
 
-func TestGenIPUsesConfiguredPrimary(t *testing.T) {
-	setPrefixes(t, "2001:470:5:559::/64", "2001:470:4:559::/64")
+func TestGenIPSpreadsAcrossConfiguredPrefixes(t *testing.T) {
+	prefixes := []string{
+		"2001:470:dab9::/64",
+		"2001:470:dab9:1::/64",
+		"2001:470:dab9:2::/64",
+		"2001:470:dab9:3::/64",
+	}
+	setPrefixes(t, prefixes...)
 	oldPrefix := config.IPv6Prefix
-	config.IPv6Prefix = "2001:470:4:559::/64"
+	config.IPv6Prefix = prefixes[0]
 	t.Cleanup(func() { config.IPv6Prefix = oldPrefix })
 	resetPool()
 	seen := map[string]int{}
@@ -83,8 +89,13 @@ func TestGenIPUsesConfiguredPrimary(t *testing.T) {
 		ipv6Pool = append(ipv6Pool, ip)
 		poolLock.Unlock()
 	}
-	if seen["2001:470:4:559::/64"] != 12 {
-		t.Fatalf("primary prefix must generate the whole pool, got %v", seen)
+	if len(seen) != len(prefixes) {
+		t.Fatalf("pool must spread over every configured /64, got %v", seen)
+	}
+	for _, p := range prefixes {
+		if seen[p] != 3 {
+			t.Errorf("prefix %s got %d of 12, want 3", p, seen[p])
+		}
 	}
 }
 
@@ -153,20 +164,20 @@ func TestEffectivePrefixesFallsBackToSingle(t *testing.T) {
 }
 
 func TestGenIPFallsBackWhenPrimaryCooling(t *testing.T) {
-	setPrefixes(t, "2001:470:5:559::/64", "2001:470:4:559::/64")
+	setPrefixes(t, "2001:470:dab9::/64", "2001:470:dab9:1::/64")
 	oldPrefix := config.IPv6Prefix
-	config.IPv6Prefix = "2001:470:4:559::/64"
+	config.IPv6Prefix = "2001:470:dab9::/64"
 	t.Cleanup(func() {
 		config.IPv6Prefix = oldPrefix
 		cooldownLock.Lock()
-		delete(prefixCooldown, "2001:470:4:559::/64")
+		delete(prefixCooldown, "2001:470:dab9::/64")
 		cooldownLock.Unlock()
 	})
 	cooldownLock.Lock()
-	prefixCooldown["2001:470:4:559::/64"] = time.Now().Add(time.Hour)
+	prefixCooldown["2001:470:dab9::/64"] = time.Now().Add(time.Hour)
 	cooldownLock.Unlock()
 	resetPool()
-	if got := prefixOf(genIP()); got != "2001:470:5:559::/64" {
-		t.Fatalf("cooling primary must fall back to another prefix, got %q", got)
+	if got := prefixOf(genIP()); got != "2001:470:dab9:1::/64" {
+		t.Fatalf("cooling primary must fall back to another /64, got %q", got)
 	}
 }

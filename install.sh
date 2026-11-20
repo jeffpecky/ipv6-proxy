@@ -14,6 +14,9 @@ HE_SERVER_V6="${HE_SERVER_V6:-}"
 HE_CLIENT_V6="${HE_CLIENT_V6:-}"
 HE_ENDPOINT_V4="${HE_ENDPOINT_V4:-}"
 HE_ROUTED64="${HE_ROUTED64:-}"
+HE_ROUTED48="${HE_ROUTED48:-}"
+# How many /64 buckets to carve from the routed /48 for the pool.
+POOL_48_PREFIX_COUNT="${POOL_48_PREFIX_COUNT:-8}"
 # Optional extra prefixes to pool from, comma separated (e.g. the tunnel's own
 # link /64, which HE routes and which is a DIFFERENT quota bucket from the
 # routed /64). Empty keeps the single-prefix behaviour.
@@ -158,6 +161,7 @@ ip link set $HE_IFACE up mtu $HE_MTU
 ip -6 addr add $HE_CLIENT_V6/64 dev $HE_IFACE 2>/dev/null || true
 ip -6 route replace ::/0 via $HE_SERVER_V6 dev $HE_IFACE metric 1
 ip -6 route replace $HE_ROUTED64 dev $HE_IFACE
+[ -n "$HE_ROUTED48" ] && ip -6 route replace $HE_ROUTED48 dev $HE_IFACE
 for p in $(echo "$PREFIX_LIST" | tr ',' ' '); do
   [ -n "$p" ] && ip -6 route replace "$p" dev $HE_IFACE 2>/dev/null || true
 done
@@ -267,21 +271,32 @@ main(){
 
   load_env_file || true
   require_tunnel_settings || exit 1
-  # The link /64 (where HE_CLIENT_V6 lives) is routed to the tunnel endpoint and
-  # carries egress on its own. Measured 2026-11-18: the routed /64 answered 429
-  # for a model while the link /64 answered 200 in the same minute, so pooling
-  # from both gives the rotator a second bucket to fall back to.
-  HE_LINK64=""
-  if [ -n "$HE_CLIENT_V6" ]; then
-    HE_LINK64=$(python3 -c "import ipaddress,sys;print(ipaddress.ip_network(sys.argv[1]+'/64',strict=False))" "$HE_CLIENT_V6" 2>/dev/null || true)
-  fi
-  PREFIX_LIST="$HE_ROUTED64"
-  if [ -n "$HE_LINK64" ] && [ "$HE_LINK64" != "$HE_ROUTED64" ]; then
-    PREFIX_LIST="$PREFIX_LIST,$HE_LINK64"
+  # A routed /48 is the default pool source: carve /64 buckets out of it so a
+  # 429 condemns one small bucket instead of the whole pool. Without a /48,
+  # fall back to the routed /64 plus the tunnel's own link /64.
+  PREFIX_LIST=""
+  if [ -n "$HE_ROUTED48" ]; then
+    PREFIX_LIST=$(python3 - "$HE_ROUTED48" "$POOL_48_PREFIX_COUNT" <<'PY48'
+import ipaddress, sys
+net = ipaddress.ip_network(sys.argv[1], strict=False)
+count = max(1, min(int(sys.argv[2]), 4096))
+print(",".join(str(s) for s in list(net.subnets(new_prefix=64))[:count]))
+PY48
+)
+  else
+    PREFIX_LIST="$HE_ROUTED64"
+    HE_LINK64=""
+    if [ -n "$HE_CLIENT_V6" ]; then
+      HE_LINK64=$(python3 -c "import ipaddress,sys;print(ipaddress.ip_network(sys.argv[1]+'/64',strict=False))" "$HE_CLIENT_V6" 2>/dev/null || true)
+    fi
+    if [ -n "$HE_LINK64" ] && [ "$HE_LINK64" != "$HE_ROUTED64" ]; then
+      PREFIX_LIST="$PREFIX_LIST,$HE_LINK64"
+    fi
   fi
   if [ -n "$HE_EXTRA_PREFIXES" ]; then
     PREFIX_LIST="$PREFIX_LIST,$HE_EXTRA_PREFIXES"
   fi
+  POOL_PRIMARY="${PREFIX_LIST%%,*}"
 
   print_info "Tunnel $HE_TUNNEL_ID: $HE_ROUTED64 via $HE_IFACE"
   print_info "Pool prefixes: $PREFIX_LIST"
@@ -455,7 +470,7 @@ SERVICEEOF
   "web_password": "$WEB_PASS",
   "username": "$PROXY_USER",
   "password": "$PROXY_PASS",
-  "ipv6_prefix": "$HE_ROUTED64",
+  "ipv6_prefix": "$POOL_PRIMARY",
   "ipv6_prefixes": $PREFIX_JSON,
   "nexthop_addr": "",
   "interface": "$HE_IFACE",

@@ -291,11 +291,11 @@ func prefixCounts() map[string]int {
 	return counts
 }
 
-// pickPrefix generates every new address from the configured primary prefix
-// (ipv6_prefix) while it is available. Other prefixes are fallback buckets
-// used only when the primary is cooling or absent; a single bucket is
-// worthless for rotation because a drained block cannot be escaped from
-// inside itself.
+// pickPrefix chooses the least-populated prefix so the pool spreads across
+// buckets instead of piling into the first. A single bucket is worthless for
+// rotation, because a drained block cannot be escaped from inside itself.
+// The configured primary prefix wins ties and the everything-is-cooling
+// fallback, but never overrides a genuinely emptier bucket.
 func pickPrefix() *net.IPNet {
 	if len(prefixPools) == 0 {
 		return nil
@@ -304,7 +304,6 @@ func pickPrefix() *net.IPNet {
 		return prefixPools[0]
 	}
 	counts := prefixCounts()
-	primary := -1
 	best := -1
 	bestN := -1
 	fallback := -1
@@ -314,9 +313,6 @@ func pickPrefix() *net.IPNet {
 	defer cooldownLock.RUnlock()
 	for i, p := range prefixPools {
 		name := p.String()
-		if name == config.IPv6Prefix {
-			primary = i
-		}
 		if until, cooled := prefixCooldown[name]; cooled && now.Before(until) {
 			if fallback < 0 || until.Before(fallbackUntil) {
 				fallback, fallbackUntil = i, until
@@ -324,26 +320,23 @@ func pickPrefix() *net.IPNet {
 			continue
 		}
 		n := counts[name]
-		if best < 0 || n < bestN {
+		if best < 0 || n < bestN || (n == bestN && name == config.IPv6Prefix) {
 			best, bestN = i, n
 		}
 	}
-	// The primary is the generator; never balance generation across buckets.
-	if primary >= 0 {
-		name := prefixPools[primary].String()
-		if until, cooled := prefixCooldown[name]; !cooled || !now.Before(until) {
-			return prefixPools[primary]
+	// A pool still has to refill when every bucket is cooling.
+	if best < 0 {
+		for i, p := range prefixPools {
+			if p.String() == config.IPv6Prefix {
+				best = i
+				break
+			}
 		}
-		// Cooling primary: use another bucket if one can refill, otherwise
-		// keep the pool alive from the primary anyway.
 		if best < 0 {
-			return prefixPools[primary]
+			best = fallback
 		}
 	}
-	if best >= 0 {
-		return prefixPools[best]
-	}
-	return prefixPools[fallback]
+	return prefixPools[best]
 }
 
 // genIP mints a random /128 inside a chosen prefix.
