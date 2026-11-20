@@ -433,6 +433,40 @@ func addOnePoolIP() bool {
 	atomic.StoreInt64(&stats.PoolSize, int64(n))
 	return true
 }
+
+// mintFreshIP creates a never-before-used address in a prefix that is not
+// cooling. A 429 signal pins this address to the reporting client: picking a
+// random survivor from the existing pool can land on an address used earlier
+// whose quota is still spent, which makes the retry 429 again even though the
+// offending bucket was retired.
+func mintFreshIP() net.IP {
+	for attempt := 0; attempt < 8; attempt++ {
+		ip := genIP()
+		if ip == nil {
+			return nil
+		}
+		if cooledPrefix(prefixOf(ip)) {
+			continue
+		}
+		poolLock.RLock()
+		_, dup := ipv6PoolIndex[ip.String()]
+		poolLock.RUnlock()
+		if dup {
+			continue
+		}
+		if addIP(ip) != nil {
+			continue
+		}
+		poolLock.Lock()
+		ipv6PoolIndex[ip.String()] = len(ipv6Pool)
+		ipv6Pool = append(ipv6Pool, ip)
+		n := len(ipv6Pool)
+		poolLock.Unlock()
+		atomic.StoreInt64(&stats.PoolSize, int64(n))
+		return ip
+	}
+	return nil
+}
 func addPoolIPs(count int) int {
 	if count < 1 {
 		return 0
@@ -1197,9 +1231,20 @@ func handleSignal(c net.Conn, raw []byte) {
 		laneLock.Lock()
 		delete(clientLanes, clientID)
 		laneLock.Unlock()
-		laneIP(clientID)
 	} else {
 		log.Printf("429 signal from %s (%s): no lane to retire", clientID, report.Model)
+	}
+	// A 429 retires the offending bucket, but a random pick from the surviving
+	// pool can still land on an address used earlier whose quota is spent.
+	// Mint a brand-new /128 and pin it before answering so the retry's new
+	// CONNECT is guaranteed to arrive from a fresh address.
+	if fresh := mintFreshIP(); fresh != nil {
+		laneLock.Lock()
+		clientLanes[clientID] = fresh
+		laneLock.Unlock()
+		log.Printf("429 signal from %s (%s): fresh exit %s", clientID, report.Model, fresh)
+	} else {
+		laneIP(clientID)
 	}
 	fmt.Fprintf(c, "HTTP/1.1 204 No Content\r\nX-Rotated: %s\r\nConnection: close\r\n\r\n", rotated)
 }
