@@ -1,0 +1,154 @@
+package main
+
+// Tests for multi-prefix pool accounting. The point of multiple prefixes is
+// multiple quota buckets, so what matters is that the pool spreads across them
+// and that a drained block can be retired as a unit.
+
+import (
+	"net"
+	"testing"
+)
+
+func setPrefixes(t *testing.T, cidrs ...string) {
+	t.Helper()
+	pools := []*net.IPNet{}
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			t.Fatalf("bad cidr %q: %v", c, err)
+		}
+		pools = append(pools, n)
+	}
+	old := prefixPools
+	prefixPools = pools
+	t.Cleanup(func() { prefixPools = old })
+}
+
+func resetPool(ips ...string) {
+	poolLock.Lock()
+	ipv6Pool = []net.IP{}
+	ipv6PoolIndex = map[string]int{}
+	for _, s := range ips {
+		ip := net.ParseIP(s)
+		ipv6PoolIndex[ip.String()] = len(ipv6Pool)
+		ipv6Pool = append(ipv6Pool, ip)
+	}
+	poolLock.Unlock()
+}
+
+func TestPrefixOfDistinguishesBlocks(t *testing.T) {
+	setPrefixes(t, "2001:470:5:559::/64", "2001:470:4:559::/64")
+
+	if got := prefixOf(net.ParseIP("2001:470:5:559:1::1")); got != "2001:470:5:559::/64" {
+		t.Errorf("pool prefix = %q", got)
+	}
+	if got := prefixOf(net.ParseIP("2001:470:4:559:1::1")); got != "2001:470:4:559::/64" {
+		t.Errorf("link prefix = %q", got)
+	}
+	if got := prefixOf(net.ParseIP("2001:470:6:559::1")); got != "" {
+		t.Errorf("unconfigured prefix must map to empty, got %q", got)
+	}
+	if got := prefixOf(nil); got != "" {
+		t.Errorf("nil must map to empty, got %q", got)
+	}
+}
+
+func TestGenIPStaysInsideAConfiguredPrefix(t *testing.T) {
+	setPrefixes(t, "2001:470:5:559::/64", "2001:470:4:559::/64")
+	for i := 0; i < 200; i++ {
+		ip := genIP()
+		if ip == nil {
+			t.Fatal("genIP returned nil with prefixes configured")
+		}
+		if prefixOf(ip) == "" {
+			t.Fatalf("generated %s outside every configured prefix", ip)
+		}
+	}
+}
+
+func TestGenIPSpreadsAcrossPrefixes(t *testing.T) {
+	setPrefixes(t, "2001:470:5:559::/64", "2001:470:4:559::/64")
+	resetPool() // empty pool: every call must pick the least-populated
+	seen := map[string]int{}
+	for i := 0; i < 12; i++ {
+		ip := genIP()
+		seen[prefixOf(ip)]++
+		// Emulate the pool growing, the way addOnePoolIP would.
+		poolLock.Lock()
+		ipv6PoolIndex[ip.String()] = len(ipv6Pool)
+		ipv6Pool = append(ipv6Pool, ip)
+		poolLock.Unlock()
+	}
+	if len(seen) != 2 {
+		t.Fatalf("pool must spread over both prefixes, got %v", seen)
+	}
+	for p, n := range seen {
+		if n < 3 {
+			t.Errorf("prefix %s got only %d of 12", p, n)
+		}
+	}
+}
+
+func TestSinglePrefixIsUnchanged(t *testing.T) {
+	setPrefixes(t, "2001:470:5:559::/64")
+	for i := 0; i < 50; i++ {
+		if got := prefixOf(genIP()); got != "2001:470:5:559::/64" {
+			t.Fatalf("single-prefix install must stay in that prefix, got %q", got)
+		}
+	}
+}
+
+func TestRetirePrefixRemovesOnlyThatBlock(t *testing.T) {
+	setPrefixes(t, "2001:470:5:559::/64", "2001:470:4:559::/64")
+	resetPool(
+		"2001:470:5:559:1::1",
+		"2001:470:5:559:2::2",
+		"2001:470:4:559:1::1",
+	)
+
+	n := retirePrefix("2001:470:5:559::/64")
+	if n != 2 {
+		t.Fatalf("expected 2 addresses retired, got %d", n)
+	}
+	if len(ipv6Pool) != 1 {
+		t.Fatalf("expected 1 address left, got %d", len(ipv6Pool))
+	}
+	if got := prefixOf(ipv6Pool[0]); got != "2001:470:4:559::/64" {
+		t.Fatalf("the healthy block must survive, left %q", got)
+	}
+}
+
+func TestRetirePrefixUnknownIsNoop(t *testing.T) {
+	setPrefixes(t, "2001:470:5:559::/64")
+	resetPool("2001:470:5:559:1::1")
+	if n := retirePrefix("2001:470:9:9::/64"); n != 0 {
+		t.Fatalf("unknown prefix must retire nothing, got %d", n)
+	}
+	if n := retirePrefix(""); n != 0 {
+		t.Fatalf("empty prefix must retire nothing, got %d", n)
+	}
+	if len(ipv6Pool) != 1 {
+		t.Fatal("pool must be untouched")
+	}
+}
+
+func TestEffectivePrefixesFallsBackToSingle(t *testing.T) {
+	oldCfg := config
+	t.Cleanup(func() { config = oldCfg })
+
+	config.IPv6Prefix = "2001:470:5:559::/64"
+	config.IPv6Prefixes = nil
+	if got := effectivePrefixes(); len(got) != 1 || got[0] != "2001:470:5:559::/64" {
+		t.Fatalf("legacy single prefix must still work, got %v", got)
+	}
+
+	config.IPv6Prefixes = []string{"2001:470:5:559::/64", "2001:470:4:559::/64", "  "}
+	if got := effectivePrefixes(); len(got) != 2 {
+		t.Fatalf("list must win and blank entries drop, got %v", got)
+	}
+
+	config.IPv6Prefixes = []string{"not-a-cidr", "2001:470:4:559::/64"}
+	if got := effectivePrefixes(); len(got) != 1 || got[0] != "2001:470:4:559::/64" {
+		t.Fatalf("invalid entries must be dropped, got %v", got)
+	}
+}

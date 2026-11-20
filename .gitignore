@@ -9,3 +9,7 @@ config.json
 *.test
 *.out
 /dist/
+
+# Site settings and credentials — never commit
+install.env
+/etc/ipv6-proxy.env

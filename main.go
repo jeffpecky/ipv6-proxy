@@ -19,9 +19,11 @@ import (
 	mrand "math/rand"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,6 +41,7 @@ type Config struct {
 	Username        string       `json:"username"`
 	Password        string       `json:"password"`
 	IPv6Prefix      string       `json:"ipv6_prefix"`
+	IPv6Prefixes    []string     `json:"ipv6_prefixes"`
 	NextHopAddr     string       `json:"nexthop_addr"`
 	Interface       string       `json:"interface"`
 	InitialPool     int          `json:"initial_pool"`
@@ -46,6 +49,8 @@ type Config struct {
 	AutoRotate      bool         `json:"auto_rotate"`
 	AutoRotateHours int          `json:"auto_rotate_hours"`
 	AutoClean       bool         `json:"auto_clean"`
+	AllowedTargets  []string     `json:"allowed_targets"`
+	AllowToken      string       `json:"allow_token"`
 	Ports           []PortConfig `json:"ports"`
 }
 type PortConfig struct {
@@ -77,8 +82,10 @@ var failLogsLock sync.RWMutex
 var active = map[string]*ActiveConn{}
 var activeLock sync.RWMutex
 var iface netlink.Link
-var prefixIP net.IP
-var prefixNet *net.IPNet
+// Every routable prefix we may bind from. Quota is bucketed per network block,
+// not per /128, so multiple prefixes are multiple buckets — the only rotation
+// that can actually escape a drained block. One prefix is the old behaviour.
+var prefixPools []*net.IPNet
 var discardQueue chan net.IP
 var rng = mrand.New(mrand.NewSource(time.Now().UnixNano()))
 var rngLock sync.Mutex
@@ -214,17 +221,101 @@ func firstSetup() error {
 	config.AutoClean = strings.ToLower(readLine("Enable automatic cleanup of failed IPs? (y/n)", "y")) == "y"
 	return saveConfig()
 }
+// effectivePrefixes is the configured set of egress prefixes, with the legacy
+// single ipv6_prefix honoured as a one-element list so old configs keep
+// working untouched.
+func effectivePrefixes() []string {
+	out := []string{}
+	seen := map[string]bool{}
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		if _, _, err := net.ParseCIDR(v); err != nil {
+			log.Printf("Ignoring invalid prefix %q: %v", v, err)
+			return
+		}
+		if seen[v] {
+			return
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	for _, p := range config.IPv6Prefixes {
+		add(p)
+	}
+	if len(out) == 0 {
+		add(config.IPv6Prefix)
+	}
+	return out
+}
+
+// prefixOf reports which configured prefix an address belongs to, or "" if it
+// belongs to none of them.
+func prefixOf(ip net.IP) string {
+	if ip == nil {
+		return ""
+	}
+	for _, p := range prefixPools {
+		if p.Contains(ip) {
+			return p.String()
+		}
+	}
+	return ""
+}
+
+// prefixCounts reports how many pool addresses sit in each prefix.
+func prefixCounts() map[string]int {
+	counts := map[string]int{}
+	poolLock.RLock()
+	defer poolLock.RUnlock()
+	for _, ip := range ipv6Pool {
+		if p := prefixOf(ip); p != "" {
+			counts[p]++
+		}
+	}
+	return counts
+}
+
+// pickPrefix chooses the least-populated prefix so the pool spreads across
+// buckets instead of piling into the first. A single bucket is worthless for
+// rotation, because a drained block cannot be escaped from inside itself.
+func pickPrefix() *net.IPNet {
+	if len(prefixPools) == 0 {
+		return nil
+	}
+	if len(prefixPools) == 1 {
+		return prefixPools[0]
+	}
+	counts := prefixCounts()
+	best := 0
+	bestN := -1
+	for i, p := range prefixPools {
+		n := counts[p.String()]
+		if bestN < 0 || n < bestN {
+			best, bestN = i, n
+		}
+	}
+	return prefixPools[best]
+}
+
+// genIP mints a random /128 inside a chosen prefix.
 func genIP() net.IP {
+	p := pickPrefix()
+	if p == nil {
+		return nil
+	}
 	ip := make(net.IP, 16)
-	copy(ip, prefixIP.To16())
-	ones, _ := prefixNet.Mask.Size()
+	copy(ip, p.IP.To16())
+	ones, _ := p.Mask.Size()
 	b := ones / 8
 	if b < 16 {
 		_, _ = rand.Read(ip[b:])
 	}
 	if ones%8 != 0 && b < 16 {
 		mask := byte(0xff << (8 - ones%8))
-		ip[b] = (prefixIP[b] & mask) | (ip[b] &^ mask)
+		ip[b] = (p.IP[b] & mask) | (ip[b] &^ mask)
 	}
 	return ip
 }
@@ -250,7 +341,7 @@ func cleanupStale() {
 			continue
 		}
 		ones, bits := a.IPNet.Mask.Size()
-		if bits != 128 || ones != 128 || !prefixNet.Contains(a.IP) {
+		if bits != 128 || ones != 128 || prefixOf(a.IP) == "" {
 			continue
 		}
 		if nh != nil && a.IP.Equal(nh) {
@@ -373,7 +464,7 @@ func clearAllIPv6() int {
 				continue
 			}
 			ones, bits := a.IPNet.Mask.Size()
-			if bits != 128 || ones != 128 || !prefixNet.Contains(a.IP) {
+			if bits != 128 || ones != 128 || prefixOf(a.IP) == "" {
 				continue
 			}
 			if nh != nil && a.IP.Equal(nh) {
@@ -404,6 +495,36 @@ func backgroundFill(ctx context.Context) {
 		}
 	}
 }
+// retirePrefix removes every pool address inside one prefix.
+//
+// A quota bucket is a network block, not an address: measured on 2026-11-18,
+// every /128 in 2001:470:5:559::/64 answered 429 for a model while
+// 2001:470:4:559::/64 answered 200 in the same minute. Retiring single
+// addresses from the drained block therefore achieves nothing — the refill
+// draws from the same block. Retiring the block, with nextPrefixIP filling
+// from the other one, is what actually moves traffic.
+func retirePrefix(prefix string) int {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return 0
+	}
+	poolLock.RLock()
+	victims := []net.IP{}
+	for _, ip := range ipv6Pool {
+		if prefixOf(ip) == prefix {
+			victims = append(victims, append(net.IP(nil), ip...))
+		}
+	}
+	poolLock.RUnlock()
+	n := 0
+	for _, ip := range victims {
+		if removePoolIP(ip) {
+			n++
+		}
+	}
+	return n
+}
+
 func rotatePool() {
 	want := config.TargetPool
 	if want < 1 {
@@ -595,10 +716,141 @@ func copyConn(dst, src net.Conn, deadline time.Time, counter *int64, wg *sync.Wa
 		}
 	}
 }
+// ---- target allowlist ------------------------------------------------------
+// Ported from the HE gateway's install.sh. A proxy on a public port is an open
+// relay unless it says what it will connect to, so this is not optional: an
+// empty list means OPEN, which the startup log states in those words.
+//
+//   "*"          any target
+//   "*.suffix"   the apex and any subdomain
+//   "re:..."     a regexp against the origin
+//   otherwise    an exact origin, e.g. https://opencode.ai
+//
+// An exact-origin hit needs no token. A wildcard or regexp hit always does, and
+// fails closed when no token is configured — a wildcard without a token would
+// be the same as "*".
+
+const defaultAllowedTargets = "https://opencode.ai,https://api.kilo.ai,https://oai.endpoints.kepler.ai.cloud.ovh.net,https://cloudflare.com"
+
+var allowEntries []string
+var allowToken string
+
+func parseAllowList(in []string) []string {
+	out := []string{}
+	for _, raw := range in {
+		for _, e := range strings.Split(raw, ",") {
+			e = strings.TrimSpace(e)
+			e = strings.TrimSuffix(e, "/")
+			if e != "" {
+				out = append(out, e)
+			}
+		}
+	}
+	return out
+}
+
+func initAllow() {
+	allowEntries = parseAllowList(config.AllowedTargets)
+	allowToken = config.AllowToken
+}
+
+// targetOrigin derives the URL origin of a proxy target. CONNECT carries no
+// scheme, so 443 is https, 80 is http, and anything else is https with an
+// explicit port. A non-HTTP port therefore matches no exact origin and fails
+// closed, which is the intent.
+func targetOrigin(host string, port uint16) string {
+	scheme := "https"
+	if port == 80 {
+		scheme = "http"
+	}
+	h := strings.Trim(host, "[]")
+	if strings.Contains(h, ":") {
+		h = "[" + h + "]"
+	}
+	if port == 443 || port == 80 {
+		return scheme + "://" + h
+	}
+	return scheme + "://" + h + ":" + strconv.Itoa(int(port))
+}
+
+func matchTarget(origin, hostname string) (matched, exact bool) {
+	for _, entry := range allowEntries {
+		switch {
+		case entry == "*":
+			matched = true
+		case strings.HasPrefix(entry, "*."):
+			suffix := strings.ToLower(strings.TrimPrefix(entry, "*."))
+			if suffix != "" && (hostname == suffix || strings.HasSuffix(hostname, "."+suffix)) {
+				matched = true
+			}
+		case strings.HasPrefix(entry, "re:"):
+			re, err := regexp.Compile(entry[3:])
+			if err != nil {
+				continue
+			}
+			if re.MatchString(origin) {
+				matched = true
+			}
+		default:
+			if u, err := url.Parse(entry); err == nil && u.Scheme != "" {
+				if u.Scheme+"://"+u.Host == origin {
+					matched = true
+					exact = true
+				}
+			} else if entry == origin || entry == hostname {
+				matched = true
+				exact = true
+			}
+		}
+	}
+	if !matched {
+		return false, false
+	}
+	return true, exact
+}
+
+func isAuthorized(exact bool, token string) bool {
+	if exact {
+		return true
+	}
+	if allowToken == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(token), []byte(allowToken)) == 1
+}
+
+func allowTarget(host string, port uint16, token string) bool {
+	if len(allowEntries) == 0 {
+		return true
+	}
+	origin := targetOrigin(host, port)
+	hostname := strings.ToLower(strings.Trim(host, "[]"))
+	matched, exact := matchTarget(origin, hostname)
+	return matched && isAuthorized(exact, token)
+}
+
+// denyTarget answers a blocked CONNECT in the dialect the client spoke.
+func denyTarget(client net.Conn, isSocks bool) {
+	if isSocks {
+		client.Write([]byte{5, 2, 0, 1, 0, 0, 0, 0, 0, 0})
+	} else {
+		client.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
+	}
+}
+
 func proxy(client net.Conn, host string, port uint16, isSocks bool) {
 	start := time.Now()
 	cip := client.RemoteAddr().String()
 	target := net.JoinHostPort(host, strconv.Itoa(int(port)))
+	// Checked here rather than in each caller so SOCKS and CONNECT cannot
+	// drift apart: one place decides, both dialects obey.
+	if !allowTarget(host, port, "") {
+		addLog(cip, target, "none", "blocked: not in allowlist", time.Since(start))
+		log.Printf("BLOCKED target not in allowlist: %s", target)
+		denyTarget(client, isSocks)
+		atomic.AddInt64(&stats.FailedConns, 1)
+		return
+	}
 	id := fmt.Sprintf("%s-%d", cip, time.Now().UnixNano())
 	activeLock.Lock()
 	active[id] = &ActiveConn{ID: id, ClientIP: cip, Target: target, IPv6: "dialing", StartTime: start}
@@ -928,7 +1180,7 @@ func startWeb(ctx context.Context) *http.Server {
 	}))
 	mux.HandleFunc("/api/stats", webAuth(func(w http.ResponseWriter, r *http.Request) {
 		up := time.Since(stats.StartTime)
-		js(w, map[string]interface{}{"active": atomic.LoadInt64(&stats.ActiveConns), "total": atomic.LoadInt64(&stats.TotalConns), "success": atomic.LoadInt64(&stats.SuccessConns), "failed": atomic.LoadInt64(&stats.FailedConns), "pool": atomic.LoadInt64(&stats.PoolSize), "target": config.TargetPool, "bytes_recv": atomic.LoadInt64(&stats.TotalBytesRecv), "bytes_sent": atomic.LoadInt64(&stats.TotalBytesSent), "auto_rotate": config.AutoRotate, "rotate_interval": config.AutoRotateHours, "uptime": fmt.Sprintf("%dd %dh %dm", int(up.Hours())/24, int(up.Hours())%24, int(up.Minutes())%60)})
+		js(w, map[string]interface{}{"active": atomic.LoadInt64(&stats.ActiveConns), "total": atomic.LoadInt64(&stats.TotalConns), "success": atomic.LoadInt64(&stats.SuccessConns), "failed": atomic.LoadInt64(&stats.FailedConns), "pool": atomic.LoadInt64(&stats.PoolSize), "target": config.TargetPool, "buckets": prefixCounts(), "bytes_recv": atomic.LoadInt64(&stats.TotalBytesRecv), "bytes_sent": atomic.LoadInt64(&stats.TotalBytesSent), "auto_rotate": config.AutoRotate, "rotate_interval": config.AutoRotateHours, "uptime": fmt.Sprintf("%dd %dh %dm", int(up.Hours())/24, int(up.Hours())%24, int(up.Minutes())%60)})
 	}))
 	mux.HandleFunc("/api/rotate", webAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
@@ -976,6 +1228,34 @@ func startWeb(ctx context.Context) *http.Server {
 		}
 		deleted := clearAllIPv6()
 		js(w, map[string]interface{}{"message": "All IPv6 addresses deleted", "deleted": deleted, "pool": atomic.LoadInt64(&stats.PoolSize), "target": config.TargetPool})
+	}))
+	mux.HandleFunc("/api/retire", webAuth(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "POST only", 405)
+			return
+		}
+		var q struct {
+			Prefix  string `json:"prefix"`
+			Address string `json:"address"`
+		}
+		if e := json.NewDecoder(r.Body).Decode(&q); e != nil {
+			http.Error(w, "invalid JSON body", 400)
+			return
+		}
+		if strings.TrimSpace(q.Prefix) != "" {
+			n := retirePrefix(q.Prefix)
+			if n > 0 {
+				log.Printf("Prefix retire: %s drained, %d addresses removed", q.Prefix, n)
+			}
+			js(w, map[string]interface{}{"prefix": q.Prefix, "removed": n, "pool": atomic.LoadInt64(&stats.PoolSize), "target": config.TargetPool, "buckets": prefixCounts()})
+			return
+		}
+		ip := net.ParseIP(strings.TrimSpace(q.Address))
+		ok := removePoolIP(ip)
+		if ok {
+			log.Printf("Lane retire: %s removed from the pool", q.Address)
+		}
+		js(w, map[string]interface{}{"address": q.Address, "retired": ok, "pool": atomic.LoadInt64(&stats.PoolSize), "target": config.TargetPool, "buckets": prefixCounts()})
 	}))
 	mux.HandleFunc("/api/logs", webAuth(func(w http.ResponseWriter, r *http.Request) {
 		logsLock.RLock()
@@ -1036,10 +1316,36 @@ func main() {
 	if e := loadConfig(); e != nil {
 		log.Fatalf("Failed to load config: %v", e)
 	}
-	prefixIP, prefixNet, e = net.ParseCIDR(config.IPv6Prefix)
-	if e != nil {
-		log.Fatalf("Unable to parse IPv6 prefix: %v", e)
+	if config.AllowedTargets == nil {
+		config.AllowedTargets = parseAllowList([]string{defaultAllowedTargets})
 	}
+	initAllow()
+	if len(allowEntries) == 0 {
+		log.Printf("Allowlist: OPEN (no targets configured)")
+	} else {
+		log.Printf("Allowlist: %d entries, token %s", len(allowEntries), map[bool]string{true: "set", false: "NOT set"}[allowToken != ""])
+		for _, e := range allowEntries {
+			log.Printf("  allow: %s", e)
+		}
+	}
+	
+	// Parse every configured prefix before anything touches the pool.
+	prefixPools = nil
+	for _, ps := range effectivePrefixes() {
+		_, n, perr := net.ParseCIDR(ps)
+		if perr != nil {
+			log.Fatalf("Unable to parse IPv6 prefix %q: %v", ps, perr)
+		}
+		prefixPools = append(prefixPools, n)
+	}
+	if len(prefixPools) == 0 {
+		log.Fatalf("No IPv6 prefix configured (set ipv6_prefix or ipv6_prefixes)")
+	}
+	log.Printf("Prefix buckets: %d", len(prefixPools))
+	for _, p := range prefixPools {
+		log.Printf("  prefix: %s", p.String())
+	}
+
 	iface, e = netlink.LinkByName(config.Interface)
 	if e != nil {
 		log.Fatalf("Unable to find network interface: %v", e)
@@ -1056,7 +1362,7 @@ func main() {
 	}
 	log.Printf("Prefixa IPv6 Gateway v%s", appVersion)
 	log.Printf("Config: proxy port %s, web port %s", config.Port, config.WebPort)
-	log.Printf("Network: %s @ %s", config.IPv6Prefix, config.Interface)
+	log.Printf("Network: %d prefix(es) @ %s", len(prefixPools), config.Interface)
 	cleanupStale()
 	if e := initPool(); e != nil {
 		log.Fatalf("Initialization failed: %v", e)
