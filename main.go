@@ -295,8 +295,8 @@ func prefixCounts() map[string]int {
 // pickPrefix chooses the least-populated prefix so the pool spreads across
 // buckets instead of piling into the first. A single bucket is worthless for
 // rotation, because a drained block cannot be escaped from inside itself.
-// The configured primary prefix wins ties and the everything-is-cooling
-// fallback, but never overrides a genuinely emptier bucket.
+// The configured primary wins ties, but when every bucket is cooling it must
+// not pin the whole pool to itself: recycle the longest-cooled bucket instead.
 func pickPrefix() *net.IPNet {
 	if len(prefixPools) == 0 {
 		return nil
@@ -310,8 +310,12 @@ func pickPrefix() *net.IPNet {
 	fallback := -1
 	var fallbackUntil time.Time
 	now := time.Now()
-	cooldownLock.RLock()
-	defer cooldownLock.RUnlock()
+	// Write lock: when every bucket is cooling the chosen one has its cooldown
+	// cleared so the background refiller can actually use it. prefixCounts()
+	// already took poolLock, so no pool lock is held here (lock order is
+	// pool -> cooldown everywhere else too).
+	cooldownLock.Lock()
+	defer cooldownLock.Unlock()
 	for i, p := range prefixPools {
 		name := p.String()
 		if until, cooled := prefixCooldown[name]; cooled && now.Before(until) {
@@ -325,17 +329,14 @@ func pickPrefix() *net.IPNet {
 			best, bestN = i, n
 		}
 	}
-	// A pool still has to refill when every bucket is cooling.
 	if best < 0 {
-		for i, p := range prefixPools {
-			if p.String() == config.IPv6Prefix {
-				best = i
-				break
-			}
+		// Every bucket is cooling. Reusing the primary forever would collapse
+		// the pool into one already-drained /64 and make later signals no-ops.
+		if fallback < 0 {
+			return prefixPools[0]
 		}
-		if best < 0 {
-			best = fallback
-		}
+		delete(prefixCooldown, prefixPools[fallback].String())
+		best = fallback
 	}
 	return prefixPools[best]
 }

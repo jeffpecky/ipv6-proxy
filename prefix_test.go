@@ -1,8 +1,7 @@
 package main
 
-// Tests for multi-prefix pool accounting. The configured primary prefix is
-// the generator; the other prefixes are fallback quota buckets when the
-// primary is cooling or absent.
+// Tests for multi-prefix pool accounting. New addresses are spread over all
+// configured prefixes so a drained bucket can actually be escaped.
 
 import (
 	"net"
@@ -179,5 +178,37 @@ func TestGenIPFallsBackWhenPrimaryCooling(t *testing.T) {
 	resetPool()
 	if got := prefixOf(genIP()); got != "2001:470:dab9:1::/64" {
 		t.Fatalf("cooling primary must fall back to another /64, got %q", got)
+	}
+}
+
+func TestPickPrefixRecyclesWhenAllCooling(t *testing.T) {
+	prefixes := []string{
+		"2001:470:dab9::/64",
+		"2001:470:dab9:1::/64",
+	}
+	setPrefixes(t, prefixes...)
+	oldPrefix := config.IPv6Prefix
+	config.IPv6Prefix = prefixes[0]
+	t.Cleanup(func() {
+		config.IPv6Prefix = oldPrefix
+		cooldownLock.Lock()
+		for _, p := range prefixes {
+			delete(prefixCooldown, p)
+		}
+		cooldownLock.Unlock()
+	})
+	resetPool()
+	cooldownLock.Lock()
+	prefixCooldown[prefixes[0]] = time.Now().Add(time.Hour)
+	prefixCooldown[prefixes[1]] = time.Now().Add(2 * time.Hour)
+	cooldownLock.Unlock()
+	if got := pickPrefix().String(); got != prefixes[1] {
+		t.Fatalf("all-cooling fallback must recycle the longest-cooled prefix, got %s", got)
+	}
+	cooldownLock.RLock()
+	_, still := prefixCooldown[prefixes[1]]
+	cooldownLock.RUnlock()
+	if still {
+		t.Fatal("recycled prefix must have its cooldown cleared")
 	}
 }
