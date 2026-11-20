@@ -471,6 +471,7 @@ SERVICEEOF
   "username": "$PROXY_USER",
   "password": "$PROXY_PASS",
   "ipv6_prefix": "$POOL_PRIMARY",
+  "ipv6_routed48": "$HE_ROUTED48",
   "ipv6_prefixes": $PREFIX_JSON,
   "nexthop_addr": "",
   "interface": "$HE_IFACE",

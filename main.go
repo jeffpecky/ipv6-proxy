@@ -41,6 +41,7 @@ type Config struct {
 	Username        string       `json:"username"`
 	Password        string       `json:"password"`
 	IPv6Prefix      string       `json:"ipv6_prefix"`
+	IPv6Routed48    string       `json:"ipv6_routed48"`
 	IPv6Prefixes    []string     `json:"ipv6_prefixes"`
 	NextHopAddr     string       `json:"nexthop_addr"`
 	Interface       string       `json:"interface"`
@@ -1366,7 +1367,7 @@ func startWeb(ctx context.Context) *http.Server {
 				extra++
 			}
 		}
-		js(w, map[string]interface{}{"version": appVersion, "prefix": config.IPv6Prefix, "interface": config.Interface, "proxy_port": config.Port, "web_port": config.WebPort, "extra_ports": extra, "auto_rotate": config.AutoRotate, "rotate_hours": config.AutoRotateHours, "auto_clean": config.AutoClean})
+		js(w, map[string]interface{}{"version": appVersion, "routed48": config.IPv6Routed48, "prefix_count": len(effectivePrefixes()), "prefix": config.IPv6Prefix, "interface": config.Interface, "proxy_port": config.Port, "web_port": config.WebPort, "extra_ports": extra, "auto_rotate": config.AutoRotate, "rotate_hours": config.AutoRotateHours, "auto_clean": config.AutoClean})
 	}))
 	mux.HandleFunc("/api/stats", webAuth(func(w http.ResponseWriter, r *http.Request) {
 		up := time.Since(stats.StartTime)
