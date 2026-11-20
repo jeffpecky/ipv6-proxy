@@ -302,10 +302,18 @@ func pickPrefix() *net.IPNet {
 	counts := prefixCounts()
 	best := -1
 	bestN := -1
+	fallback := -1
+	var fallbackUntil time.Time
 	now := time.Now()
 	cooldownLock.RLock()
 	for i, p := range prefixPools {
 		if until, cooled := prefixCooldown[p.String()]; cooled && now.Before(until) {
+			// If every bucket is cooling, refill the one that recovers first
+			// rather than an arbitrary first entry: reusing a freshly drained
+			// bucket would turn one 429 into a stream of them.
+			if fallback < 0 || until.Before(fallbackUntil) {
+				fallback, fallbackUntil = i, until
+			}
 			continue
 		}
 		n := counts[p.String()]
@@ -316,10 +324,7 @@ func pickPrefix() *net.IPNet {
 	cooldownLock.RUnlock()
 	// A pool still has to refill when every bucket is cooling.
 	if best < 0 {
-		for i := range prefixPools {
-			best = i
-			break
-		}
+		best = fallback
 	}
 	return prefixPools[best]
 }
@@ -1159,11 +1164,16 @@ func handleSignal(c net.Conn, raw []byte) {
 		if prefix != "" && len(prefixPools) > 1 {
 			// Quota is keyed on the /64 bucket, not the individual /128: every
 			// address in a drained block gets 429. Retire the whole block and
-			// keep the refiller out of it for a while.
-			n := retirePrefix(prefix)
-			coolPrefix(prefix)
+			// keep the refiller out of it for a while. Concurrent reports from
+			// the same client must not re-retire a bucket already cooling.
 			rotated = prefix
-			log.Printf("429 signal from %s (%s): retired prefix %s (%d IPs)", clientID, report.Model, prefix, n)
+			if cooledPrefix(prefix) {
+				log.Printf("429 signal from %s (%s): prefix %s already cooling", clientID, report.Model, prefix)
+			} else {
+				n := retirePrefix(prefix)
+				coolPrefix(prefix)
+				log.Printf("429 signal from %s (%s): retired prefix %s (%d IPs)", clientID, report.Model, prefix, n)
+			}
 		} else {
 			removePoolIP(victim)
 			rotated = victim.String()
