@@ -29,6 +29,7 @@ WEB_USER="${WEB_USER:-admin}"
 WEB_PASS="${WEB_PASS:-}"
 PROXY_USER="${PROXY_USER:-proxy}"
 PROXY_PASS="${PROXY_PASS:-}"
+SIGNAL_TOKEN="${SIGNAL_TOKEN:-}"
 ALLOWED_TARGETS="${ALLOWED_TARGETS:-https://opencode.ai,https://api.kilo.ai,https://oai.endpoints.kepler.ai.cloud.ovh.net,https://cloudflare.com}"
 ALLOW_TOKEN="${ALLOW_TOKEN:-}"
 
@@ -439,6 +440,7 @@ SERVICEEOF
     print_info "Writing config.json for $HE_ROUTED64"
     if [ -z "$WEB_PASS" ]; then WEB_PASS="$(gen_pass)"; fi
     if [ -z "$PROXY_PASS" ]; then PROXY_PASS="$(gen_pass)"; fi
+    if [ -z "$SIGNAL_TOKEN" ]; then SIGNAL_TOKEN="$PROXY_PASS"; fi
     PREFIX_JSON=$(printf '%s' "$PREFIX_LIST" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' | sed 's/.*/"&"/' | paste -sd, -)
     [ -n "$PREFIX_JSON" ] && PREFIX_JSON="[$PREFIX_JSON]" || PREFIX_JSON="[]"
     ALLOW_JSON=$(printf '%s\n' "$ALLOWED_TARGETS" | tr ',' '\n' \
@@ -464,6 +466,8 @@ SERVICEEOF
   "auto_clean": true,
   "allowed_targets": $ALLOW_JSON,
   "allow_token": "$ALLOW_TOKEN",
+  "signal_token": "$SIGNAL_TOKEN",
+  "signal_cooldown_minutes": 15,
   "ports": []
 }
 CONFIGEOF
@@ -498,6 +502,7 @@ CONFIGEOF
   echo "Web panel: http://${IP}:${WEB_PORT}"
   echo "HTTP proxy: http://proxy:proxy@${IP}:${PROXY_PORT}"
   echo "SOCKS5 proxy: socks5://proxy:proxy@${IP}:${PROXY_PORT}"
+  echo "429 signal: POST http://${IP}:${PROXY_PORT}/__signal (bearer: $SIGNAL_TOKEN)"
   echo "Config file: $INSTALL_DIR/config.json"
 }
 

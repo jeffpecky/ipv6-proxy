@@ -51,6 +51,8 @@ type Config struct {
 	AutoClean       bool         `json:"auto_clean"`
 	AllowedTargets  []string     `json:"allowed_targets"`
 	AllowToken      string       `json:"allow_token"`
+	SignalToken     string       `json:"signal_token"`
+	SignalCooldown  int          `json:"signal_cooldown_minutes"`
 	Ports           []PortConfig `json:"ports"`
 }
 type PortConfig struct {
@@ -63,6 +65,7 @@ type PortConfig struct {
 type Stats struct {
 	StartTime                                                                                                  time.Time
 	TotalConns, ActiveConns, SuccessConns, FailedConns, TimeoutConns, PoolSize, TotalBytesRecv, TotalBytesSent int64
+	SignalReports int64
 }
 type ConnLog struct{ Time, ClientIP, Target, IPv6, Status, Duration string }
 type ActiveConn struct {
@@ -89,6 +92,14 @@ var prefixPools []*net.IPNet
 var discardQueue chan net.IP
 var rng = mrand.New(mrand.NewSource(time.Now().UnixNano()))
 var rngLock sync.Mutex
+
+// A 429 is reported by the client that saw it, not by the proxy: CONNECT only
+// carries encrypted bytes. These maps tie a proxy username to one exit address
+// and keep drained buckets out of the refill path long enough to matter.
+var laneLock sync.RWMutex
+var clientLanes = map[string]net.IP{}
+var cooldownLock sync.RWMutex
+var prefixCooldown = map[string]time.Time{}
 
 //go:embed web
 var webFS embed.FS
@@ -289,12 +300,25 @@ func pickPrefix() *net.IPNet {
 		return prefixPools[0]
 	}
 	counts := prefixCounts()
-	best := 0
+	best := -1
 	bestN := -1
+	now := time.Now()
+	cooldownLock.RLock()
 	for i, p := range prefixPools {
+		if until, cooled := prefixCooldown[p.String()]; cooled && now.Before(until) {
+			continue
+		}
 		n := counts[p.String()]
-		if bestN < 0 || n < bestN {
+		if best < 0 || n < bestN {
 			best, bestN = i, n
+		}
+	}
+	cooldownLock.RUnlock()
+	// A pool still has to refill when every bucket is cooling.
+	if best < 0 {
+		for i := range prefixPools {
+			best = i
+			break
 		}
 	}
 	return prefixPools[best]
@@ -593,6 +617,69 @@ func getIP() net.IP {
 	rngLock.Unlock()
 	return append(net.IP(nil), ipv6Pool[i]...)
 }
+func cooledPrefix(prefix string) bool {
+	if prefix == "" {
+		return false
+	}
+	cooldownLock.RLock()
+	defer cooldownLock.RUnlock()
+	until, ok := prefixCooldown[prefix]
+	return ok && time.Now().Before(until)
+}
+func coolPrefix(prefix string) {
+	if prefix == "" || len(prefixPools) < 2 {
+		return
+	}
+	minutes := config.SignalCooldown
+	if minutes < 1 {
+		minutes = 15
+	}
+	cooldownLock.Lock()
+	prefixCooldown[prefix] = time.Now().Add(time.Duration(minutes) * time.Minute)
+	cooldownLock.Unlock()
+}
+
+// laneIP pins one client to one exit until a 429 signal condemns it. That makes
+// the offending address known: a fresh TLS connection from the same client
+// cannot silently land on a different address and hide the verdict.
+func laneIP(clientID string) net.IP {
+	if clientID == "" {
+		return getIP()
+	}
+	laneLock.RLock()
+	ip, ok := clientLanes[clientID]
+	laneLock.RUnlock()
+	if ok {
+		poolLock.RLock()
+		_, still := ipv6PoolIndex[ip.String()]
+		poolLock.RUnlock()
+		if still && !cooledPrefix(prefixOf(ip)) {
+			return append(net.IP(nil), ip...)
+		}
+	}
+	poolLock.RLock()
+	candidates := make([]net.IP, 0, len(ipv6Pool))
+	for _, x := range ipv6Pool {
+		if p := prefixOf(x); p == "" || !cooledPrefix(p) {
+			candidates = append(candidates, x)
+		}
+	}
+	poolLock.RUnlock()
+	if len(candidates) == 0 {
+		ip = getIP()
+	} else {
+		rngLock.Lock()
+		i := rng.Intn(len(candidates))
+		rngLock.Unlock()
+		ip = append(net.IP(nil), candidates[i]...)
+	}
+	if ip != nil {
+		laneLock.Lock()
+		clientLanes[clientID] = ip
+		laneLock.Unlock()
+	}
+	return ip
+}
 func removePoolIP(ip net.IP) bool {
 	if ip == nil {
 		return false
@@ -838,7 +925,7 @@ func denyTarget(client net.Conn, isSocks bool) {
 	}
 }
 
-func proxy(client net.Conn, host string, port uint16, isSocks bool) {
+func proxy(client net.Conn, host string, port uint16, isSocks bool, clientID string) {
 	start := time.Now()
 	cip := client.RemoteAddr().String()
 	target := net.JoinHostPort(host, strconv.Itoa(int(port)))
@@ -889,7 +976,7 @@ func proxy(client net.Conn, host string, port uint16, isSocks bool) {
 		logIP := "IPv4"
 		var ip net.IP
 		if dt.UseIPv6 {
-			ip = getIP()
+			ip = laneIP(clientID)
 			if ip == nil {
 				lastErr = errors.New("no available IP")
 				break
@@ -1018,7 +1105,78 @@ func handleSocks(c net.Conn, first byte, listenPort string) {
 		c.Write([]byte{5, 8, 0, 1, 0, 0, 0, 0, 0, 0})
 		return
 	}
-	proxy(c, host, port, true)
+	proxy(c, host, port, true, u)
+}
+// handleSignal is the out-of-band 429 channel. zen-proxy is the only process
+// that can read a 429 inside the CONNECT tunnel, so it POSTs the verdict here
+// with a bearer token. No log scraping, no polling, no guessing which client.
+func handleSignal(c net.Conn, raw []byte) {
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer c.SetReadDeadline(time.Time{})
+	deny := func(code int) {
+		fmt.Fprintf(c, "HTTP/1.1 %d %s\r\nConnection: close\r\n\r\n", code, http.StatusText(code))
+	}
+	if config.SignalToken == "" {
+		deny(404)
+		return
+	}
+	r, err := http.ReadRequest(bufio.NewReader(io.MultiReader(bytes.NewReader(raw), c)))
+	if err != nil || r.Method != "POST" || r.URL.Path != "/__signal" {
+		deny(400)
+		return
+	}
+	token := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	if subtle.ConstantTimeCompare([]byte(token), []byte(config.SignalToken)) != 1 {
+		c.Write([]byte("HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer\r\nConnection: close\r\n\r\n"))
+		return
+	}
+	var report struct {
+		ClientID   string  `json:"clientId"`
+		Status     int     `json:"status"`
+		Model      string  `json:"model"`
+		RetryAfter float64 `json:"retryAfter"`
+	}
+	if json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&report) != nil {
+		deny(400)
+		return
+	}
+	if report.Status != 429 {
+		c.Write([]byte("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n"))
+		return
+	}
+	clientID := strings.TrimSpace(report.ClientID)
+	if clientID == "" || len(clientID) > 64 || strings.ContainsAny(clientID, " \t\r\n:") {
+		deny(400)
+		return
+	}
+	atomic.AddInt64(&stats.SignalReports, 1)
+	laneLock.RLock()
+	victim, known := clientLanes[clientID]
+	laneLock.RUnlock()
+	rotated := ""
+	if known && victim != nil {
+		prefix := prefixOf(victim)
+		if prefix != "" && len(prefixPools) > 1 {
+			// Quota is keyed on the /64 bucket, not the individual /128: every
+			// address in a drained block gets 429. Retire the whole block and
+			// keep the refiller out of it for a while.
+			n := retirePrefix(prefix)
+			coolPrefix(prefix)
+			rotated = prefix
+			log.Printf("429 signal from %s (%s): retired prefix %s (%d IPs)", clientID, report.Model, prefix, n)
+		} else {
+			removePoolIP(victim)
+			rotated = victim.String()
+			log.Printf("429 signal from %s (%s): retired IP %s", clientID, report.Model, victim)
+		}
+		laneLock.Lock()
+		delete(clientLanes, clientID)
+		laneLock.Unlock()
+		laneIP(clientID)
+	} else {
+		log.Printf("429 signal from %s (%s): no lane to retire", clientID, report.Model)
+	}
+	fmt.Fprintf(c, "HTTP/1.1 204 No Content\r\nX-Rotated: %s\r\nConnection: close\r\n\r\n", rotated)
 }
 func handleHTTP(c net.Conn, first byte, listenPort string) {
 	defer c.Close()
@@ -1031,9 +1189,17 @@ func handleHTTP(c net.Conn, first byte, listenPort string) {
 	}
 	lines := strings.Split(string(b[:n+1]), "\r\n")
 	parts := strings.Fields(lines[0])
+	if len(parts) < 2 {
+		return
+	}
+	if parts[0] == "POST" && parts[1] == "/__signal" {
+		handleSignal(c, b[:n+1])
+		return
+	}
 	if len(parts) < 3 {
 		return
 	}
+	proxyUser := ""
 	ok := false
 	for _, line := range lines {
 		if strings.HasPrefix(strings.ToLower(line), "proxy-authorization: basic ") {
@@ -1042,6 +1208,7 @@ func handleHTTP(c net.Conn, first byte, listenPort string) {
 				kv := strings.SplitN(string(dec), ":", 2)
 				if len(kv) == 2 && auth(listenPort, kv[0], kv[1]) {
 					ok = true
+					proxyUser = kv[0]
 				}
 			}
 		}
@@ -1065,7 +1232,7 @@ func handleHTTP(c net.Conn, first byte, listenPort string) {
 		c.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\n"))
 		return
 	}
-	proxy(c, h, uint16(pn), false)
+	proxy(c, h, uint16(pn), false, proxyUser)
 }
 func handleConn(c net.Conn, port string) {
 	atomic.AddInt64(&stats.ActiveConns, 1)
@@ -1180,7 +1347,7 @@ func startWeb(ctx context.Context) *http.Server {
 	}))
 	mux.HandleFunc("/api/stats", webAuth(func(w http.ResponseWriter, r *http.Request) {
 		up := time.Since(stats.StartTime)
-		js(w, map[string]interface{}{"active": atomic.LoadInt64(&stats.ActiveConns), "total": atomic.LoadInt64(&stats.TotalConns), "success": atomic.LoadInt64(&stats.SuccessConns), "failed": atomic.LoadInt64(&stats.FailedConns), "pool": atomic.LoadInt64(&stats.PoolSize), "target": config.TargetPool, "buckets": prefixCounts(), "bytes_recv": atomic.LoadInt64(&stats.TotalBytesRecv), "bytes_sent": atomic.LoadInt64(&stats.TotalBytesSent), "auto_rotate": config.AutoRotate, "rotate_interval": config.AutoRotateHours, "uptime": fmt.Sprintf("%dd %dh %dm", int(up.Hours())/24, int(up.Hours())%24, int(up.Minutes())%60)})
+		js(w, map[string]interface{}{"active": atomic.LoadInt64(&stats.ActiveConns), "total": atomic.LoadInt64(&stats.TotalConns), "success": atomic.LoadInt64(&stats.SuccessConns), "failed": atomic.LoadInt64(&stats.FailedConns), "signals": atomic.LoadInt64(&stats.SignalReports), "pool": atomic.LoadInt64(&stats.PoolSize), "target": config.TargetPool, "buckets": prefixCounts(), "bytes_recv": atomic.LoadInt64(&stats.TotalBytesRecv), "bytes_sent": atomic.LoadInt64(&stats.TotalBytesSent), "auto_rotate": config.AutoRotate, "rotate_interval": config.AutoRotateHours, "uptime": fmt.Sprintf("%dd %dh %dm", int(up.Hours())/24, int(up.Hours())%24, int(up.Minutes())%60)})
 	}))
 	mux.HandleFunc("/api/rotate", webAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
@@ -1388,6 +1555,9 @@ func main() {
 				log.Printf("Failed to listen on port %s: %v", p.Port, e)
 			}
 		}
+	}
+	if config.SignalToken != "" {
+		log.Printf("429 signal endpoint: POST /__signal on proxy port %s (bearer token)", config.Port)
 	}
 	log.Println("Service ready")
 	stop := make(chan os.Signal, 1)
