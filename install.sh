@@ -147,8 +147,12 @@ if [ -f /run/he-endpoint ]; then
   read -r DETECTED_V4 < /run/he-endpoint || true
   [ -n "\$DETECTED_V4" ] && LOCAL_V4="\$DETECTED_V4"
 fi
-ip tunnel del $HE_IFACE 2>/dev/null || true
-ip tunnel add $HE_IFACE mode sit remote $HE_SERVER_V4 local "\$LOCAL_V4" ttl 255 || exit 1
+if ip link show $HE_IFACE >/dev/null 2>&1; then
+  # Change in place: deleting the link would also delete every pooled /128.
+  ip tunnel change $HE_IFACE mode sit remote $HE_SERVER_V4 local "\$LOCAL_V4" ttl 255 || exit 1
+else
+  ip tunnel add $HE_IFACE mode sit remote $HE_SERVER_V4 local "\$LOCAL_V4" ttl 255 || exit 1
+fi
 ip link set $HE_IFACE up mtu $HE_MTU
 ip -6 addr add $HE_CLIENT_V6/64 dev $HE_IFACE 2>/dev/null || true
 ip -6 route replace ::/0 via $HE_SERVER_V6 dev $HE_IFACE metric 1
