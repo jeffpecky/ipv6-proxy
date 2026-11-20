@@ -7,6 +7,28 @@ HTTP CONNECT + SOCKS5 on one port, outbound traffic rotated across a pool of /12
 curl -fsSL https://raw.githubusercontent.com/jeffpecky/ipv6-proxy/main/install.sh | sudo bash
 ```
 
+## Upstream 429 relay signal
+
+A TLS proxy cannot see an upstream `429` inside a CONNECT tunnel. Clients that
+can (e.g. zen-proxy) report it out of band instead:
+
+```
+POST http://<host>:1080/__signal
+Authorization: Bearer <signal_token>
+Content-Type: application/json
+
+{"clientId":"fltg","status":429,"model":"...","retryAfter":1}
+```
+
+A valid report returns `204 No Content` with `X-Rotated: <prefix>`. The proxy
+username is pinned to one exit until a report condemns it; then the whole `/64`
+bucket is retired, cooled for `signal_cooldown_minutes` (default 15), and the
+client gets a fresh exit. Repeat reports for a bucket already cooling only
+rotate the lane. Multiple clients need distinct proxy usernames.
+
+`signal_token` defaults to `PROXY_PASS` in the installer and can be set through
+`SIGNAL_TOKEN` in `install.env`. The signal count is exposed at `/api/stats`.
+
 ## Layout
 ```
 main.go                 proxy + web API
