@@ -291,11 +291,11 @@ func prefixCounts() map[string]int {
 	return counts
 }
 
-// pickPrefix chooses the least-populated prefix so the pool spreads across
-// buckets instead of piling into the first. A single bucket is worthless for
-// rotation, because a drained block cannot be escaped from inside itself.
-// The configured primary prefix wins ties and the everything-is-cooling
-// fallback, so routine pool generation stays on that bucket.
+// pickPrefix generates every new address from the configured primary prefix
+// (ipv6_prefix) while it is available. Other prefixes are fallback buckets
+// used only when the primary is cooling or absent; a single bucket is
+// worthless for rotation because a drained block cannot be escaped from
+// inside itself.
 func pickPrefix() *net.IPNet {
 	if len(prefixPools) == 0 {
 		return nil
@@ -304,42 +304,46 @@ func pickPrefix() *net.IPNet {
 		return prefixPools[0]
 	}
 	counts := prefixCounts()
+	primary := -1
 	best := -1
 	bestN := -1
 	fallback := -1
 	var fallbackUntil time.Time
 	now := time.Now()
 	cooldownLock.RLock()
+	defer cooldownLock.RUnlock()
 	for i, p := range prefixPools {
 		name := p.String()
+		if name == config.IPv6Prefix {
+			primary = i
+		}
 		if until, cooled := prefixCooldown[name]; cooled && now.Before(until) {
-			// Track the earliest recovery as a last resort. The configured
-			// primary is preferred below even while cooling: it is the
-			// intended generator and other prefixes are fallbacks.
 			if fallback < 0 || until.Before(fallbackUntil) {
 				fallback, fallbackUntil = i, until
 			}
 			continue
 		}
 		n := counts[name]
-		if best < 0 || n < bestN || (n == bestN && name == config.IPv6Prefix) {
+		if best < 0 || n < bestN {
 			best, bestN = i, n
 		}
 	}
-	cooldownLock.RUnlock()
-	// A pool still has to refill when every bucket is cooling.
-	if best < 0 {
-		for i, p := range prefixPools {
-			if p.String() == config.IPv6Prefix {
-				best = i
-				break
-			}
+	// The primary is the generator; never balance generation across buckets.
+	if primary >= 0 {
+		name := prefixPools[primary].String()
+		if until, cooled := prefixCooldown[name]; !cooled || !now.Before(until) {
+			return prefixPools[primary]
 		}
+		// Cooling primary: use another bucket if one can refill, otherwise
+		// keep the pool alive from the primary anyway.
 		if best < 0 {
-			best = fallback
+			return prefixPools[primary]
 		}
 	}
-	return prefixPools[best]
+	if best >= 0 {
+		return prefixPools[best]
+	}
+	return prefixPools[fallback]
 }
 
 // genIP mints a random /128 inside a chosen prefix.

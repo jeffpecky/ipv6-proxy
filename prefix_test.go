@@ -1,12 +1,13 @@
 package main
 
-// Tests for multi-prefix pool accounting. The point of multiple prefixes is
-// multiple quota buckets, so what matters is that the pool spreads across them
-// and that a drained block can be retired as a unit.
+// Tests for multi-prefix pool accounting. The configured primary prefix is
+// the generator; the other prefixes are fallback quota buckets when the
+// primary is cooling or absent.
 
 import (
 	"net"
 	"testing"
+	"time"
 )
 
 func setPrefixes(t *testing.T, cidrs ...string) {
@@ -66,9 +67,12 @@ func TestGenIPStaysInsideAConfiguredPrefix(t *testing.T) {
 	}
 }
 
-func TestGenIPSpreadsAcrossPrefixes(t *testing.T) {
+func TestGenIPUsesConfiguredPrimary(t *testing.T) {
 	setPrefixes(t, "2001:470:5:559::/64", "2001:470:4:559::/64")
-	resetPool() // empty pool: every call must pick the least-populated
+	oldPrefix := config.IPv6Prefix
+	config.IPv6Prefix = "2001:470:4:559::/64"
+	t.Cleanup(func() { config.IPv6Prefix = oldPrefix })
+	resetPool()
 	seen := map[string]int{}
 	for i := 0; i < 12; i++ {
 		ip := genIP()
@@ -79,13 +83,8 @@ func TestGenIPSpreadsAcrossPrefixes(t *testing.T) {
 		ipv6Pool = append(ipv6Pool, ip)
 		poolLock.Unlock()
 	}
-	if len(seen) != 2 {
-		t.Fatalf("pool must spread over both prefixes, got %v", seen)
-	}
-	for p, n := range seen {
-		if n < 3 {
-			t.Errorf("prefix %s got only %d of 12", p, n)
-		}
+	if seen["2001:470:4:559::/64"] != 12 {
+		t.Fatalf("primary prefix must generate the whole pool, got %v", seen)
 	}
 }
 
@@ -150,5 +149,24 @@ func TestEffectivePrefixesFallsBackToSingle(t *testing.T) {
 	config.IPv6Prefixes = []string{"not-a-cidr", "2001:470:4:559::/64"}
 	if got := effectivePrefixes(); len(got) != 1 || got[0] != "2001:470:4:559::/64" {
 		t.Fatalf("invalid entries must be dropped, got %v", got)
+	}
+}
+
+func TestGenIPFallsBackWhenPrimaryCooling(t *testing.T) {
+	setPrefixes(t, "2001:470:5:559::/64", "2001:470:4:559::/64")
+	oldPrefix := config.IPv6Prefix
+	config.IPv6Prefix = "2001:470:4:559::/64"
+	t.Cleanup(func() {
+		config.IPv6Prefix = oldPrefix
+		cooldownLock.Lock()
+		delete(prefixCooldown, "2001:470:4:559::/64")
+		cooldownLock.Unlock()
+	})
+	cooldownLock.Lock()
+	prefixCooldown["2001:470:4:559::/64"] = time.Now().Add(time.Hour)
+	cooldownLock.Unlock()
+	resetPool()
+	if got := prefixOf(genIP()); got != "2001:470:5:559::/64" {
+		t.Fatalf("cooling primary must fall back to another prefix, got %q", got)
 	}
 }
