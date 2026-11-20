@@ -65,7 +65,7 @@ type PortConfig struct {
 type Stats struct {
 	StartTime                                                                                                  time.Time
 	TotalConns, ActiveConns, SuccessConns, FailedConns, TimeoutConns, PoolSize, TotalBytesRecv, TotalBytesSent int64
-	SignalReports int64
+	SignalReports                                                                                              int64
 }
 type ConnLog struct{ Time, ClientIP, Target, IPv6, Status, Duration string }
 type ActiveConn struct {
@@ -85,6 +85,7 @@ var failLogsLock sync.RWMutex
 var active = map[string]*ActiveConn{}
 var activeLock sync.RWMutex
 var iface netlink.Link
+
 // Every routable prefix we may bind from. Quota is bucketed per network block,
 // not per /128, so multiple prefixes are multiple buckets — the only rotation
 // that can actually escape a drained block. One prefix is the old behaviour.
@@ -232,6 +233,7 @@ func firstSetup() error {
 	config.AutoClean = strings.ToLower(readLine("Enable automatic cleanup of failed IPs? (y/n)", "y")) == "y"
 	return saveConfig()
 }
+
 // effectivePrefixes is the configured set of egress prefixes, with the legacy
 // single ipv6_prefix honoured as a one-element list so old configs keep
 // working untouched.
@@ -292,6 +294,8 @@ func prefixCounts() map[string]int {
 // pickPrefix chooses the least-populated prefix so the pool spreads across
 // buckets instead of piling into the first. A single bucket is worthless for
 // rotation, because a drained block cannot be escaped from inside itself.
+// The configured primary prefix wins ties and the everything-is-cooling
+// fallback, so routine pool generation stays on that bucket.
 func pickPrefix() *net.IPNet {
 	if len(prefixPools) == 0 {
 		return nil
@@ -307,24 +311,33 @@ func pickPrefix() *net.IPNet {
 	now := time.Now()
 	cooldownLock.RLock()
 	for i, p := range prefixPools {
-		if until, cooled := prefixCooldown[p.String()]; cooled && now.Before(until) {
-			// If every bucket is cooling, refill the one that recovers first
-			// rather than an arbitrary first entry: reusing a freshly drained
-			// bucket would turn one 429 into a stream of them.
+		name := p.String()
+		if until, cooled := prefixCooldown[name]; cooled && now.Before(until) {
+			// Track the earliest recovery as a last resort. The configured
+			// primary is preferred below even while cooling: it is the
+			// intended generator and other prefixes are fallbacks.
 			if fallback < 0 || until.Before(fallbackUntil) {
 				fallback, fallbackUntil = i, until
 			}
 			continue
 		}
-		n := counts[p.String()]
-		if best < 0 || n < bestN {
+		n := counts[name]
+		if best < 0 || n < bestN || (n == bestN && name == config.IPv6Prefix) {
 			best, bestN = i, n
 		}
 	}
 	cooldownLock.RUnlock()
 	// A pool still has to refill when every bucket is cooling.
 	if best < 0 {
-		best = fallback
+		for i, p := range prefixPools {
+			if p.String() == config.IPv6Prefix {
+				best = i
+				break
+			}
+		}
+		if best < 0 {
+			best = fallback
+		}
 	}
 	return prefixPools[best]
 }
@@ -524,6 +537,7 @@ func backgroundFill(ctx context.Context) {
 		}
 	}
 }
+
 // retirePrefix removes every pool address inside one prefix.
 //
 // A quota bucket is a network block, not an address: measured on 2026-11-18,
@@ -808,6 +822,7 @@ func copyConn(dst, src net.Conn, deadline time.Time, counter *int64, wg *sync.Wa
 		}
 	}
 }
+
 // ---- target allowlist ------------------------------------------------------
 // Ported from the HE gateway's install.sh. A proxy on a public port is an open
 // relay unless it says what it will connect to, so this is not optional: an
@@ -1112,6 +1127,7 @@ func handleSocks(c net.Conn, first byte, listenPort string) {
 	}
 	proxy(c, host, port, true, u)
 }
+
 // handleSignal is the out-of-band 429 channel. zen-proxy is the only process
 // that can read a 429 inside the CONNECT tunnel, so it POSTs the verdict here
 // with a bearer token. No log scraping, no polling, no guessing which client.
@@ -1505,7 +1521,7 @@ func main() {
 			log.Printf("  allow: %s", e)
 		}
 	}
-	
+
 	// Parse every configured prefix before anything touches the pool.
 	prefixPools = nil
 	for _, ps := range effectivePrefixes() {
